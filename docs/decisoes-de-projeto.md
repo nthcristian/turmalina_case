@@ -22,7 +22,7 @@
 
 ## 6. Limites mistos: mudança fixa e posição relativa
 
-**Decisão.** Quedas superiores a 5% em vendas/dia ou vendas/hora e a 2 pontos percentuais de margem são sinais fixos; desperdício e experiência usam o pior quartil da rede elegível. **Alternativas.** Um único limite para tudo, meta externa inventada ou qualquer queda como alerta. **Critério.** O case não fornece metas de serviço nem tolerância de desperdício, mas permite definir mudança material para os indicadores de tendência. Quartis tornam explícito que os últimos dois sinais são relativos. **Invalidaria a decisão.** Metas operacionais homologadas pela empresa substituiriam os quartis e poderiam recalibrar os limites fixos.
+**Decisão.** Quedas superiores a 5% em vendas/dia ou vendas/hora e a 2 pontos percentuais de margem são sinais fixos; desperdício e experiência usam o pior quartil da rede madura inteira, sem segmentação por formato ou modelo. **Alternativas.** Um único limite para tudo, meta externa inventada ou qualquer queda como alerta. **Critério.** O case não fornece metas de serviço nem tolerância de desperdício, mas permite definir mudança material para os indicadores de tendência. Quartis tornam explícito que os últimos dois sinais são relativos. **Invalidaria a decisão.** Metas operacionais homologadas pela empresa substituiriam os quartis e poderiam recalibrar os limites fixos.
 
 ## 7. Margem após insumos, nunca “lucro”
 
@@ -47,3 +47,7 @@
 ## 12. Arquitetura: API Rust e interface Astro estática
 
 **Decisão.** A API Rust lê, valida, padroniza e agrega os CSVs na inicialização; a interface Astro estática consome endpoints JSON e apresenta as cinco páginas. **Alternativas.** Planilha manual, aplicação única com servidor renderizado, processamento dos CSVs a cada requisição ou dashboard Python. **Critério.** A separação concentra regras de dados em um único serviço, mantém a camada visual simples e reproduz os resultados sem alterar os originais. O volume atual é pequeno, portanto a agregação na inicialização é suficiente. **Invalidaria a decisão.** Atualizações contínuas, milhões de linhas ou necessidade de filtros ad hoc poderiam justificar banco de dados, cache ou cálculo sob demanda.
+
+## 13. Filtros restritos à segmentação disponível
+
+**Decisão.** A tela de lojas mantém o período fixo nas janelas rolantes calculadas a partir da última venda disponível e oferece filtros somente de formato e modelo. **Alternativas.** Seletor livre de datas, filtro por status de abertura ou filtros por cidade e canal. **Critério.** A API calcula indicadores para um único recorte temporal e a interface só aplica segmentações para as dimensões de formato e modelo. Prometer filtros adicionais criaria uma expectativa que a entrega não atende. **Invalidaria a decisão.** Endpoints com recálculo por intervalo e suporte explícito às demais dimensões permitiriam ampliar os filtros.

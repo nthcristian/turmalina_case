@@ -2,7 +2,7 @@ use std::{fs::File, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use api::{
-    indicator::StoreIndicators,
+    indicator::{AnalysisMetadata, StoreIndicators},
     model::{DailySale, DataQuality, Product, Rating, Store, normalize_loaded_data},
 };
 use axum::{
@@ -24,6 +24,7 @@ struct AppState {
     indicators: Arc<Vec<StoreIndicators>>,
     data_quality: Arc<DataQuality>,
     daily_sales: Arc<Vec<DailySale>>,
+    metadata: Arc<AnalysisMetadata>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +61,10 @@ async fn list_indicators(State(state): State<AppState>) -> Json<Vec<StoreIndicat
 
 async fn get_data_quality(State(state): State<AppState>) -> Json<DataQuality> {
     Json(state.data_quality.as_ref().clone())
+}
+
+async fn get_metadata(State(state): State<AppState>) -> Json<AnalysisMetadata> {
+    Json(state.metadata.as_ref().clone())
 }
 
 async fn get_store_indicators(
@@ -125,6 +130,7 @@ async fn main() -> Result<()> {
     let mut daily_sales: Vec<DailySale> = sales_reader.deserialize().collect::<Result<_, _>>()?;
     let data_quality =
         normalize_loaded_data(&mut stores, &mut daily_sales, &mut products, &mut ratings);
+    let metadata = AnalysisMetadata::from_daily_sales(&daily_sales)?;
 
     let mut indicators = stores
         .iter()
@@ -148,12 +154,14 @@ async fn main() -> Result<()> {
         indicators: Arc::new(indicators),
         data_quality: Arc::new(data_quality),
         daily_sales: Arc::new(daily_sales),
+        metadata: Arc::new(metadata),
     };
     let app = Router::new()
         .route("/api/stores", get(list_stores))
         .route("/api/stores/{store_id}", get(get_store))
         .route("/api/indicators", get(list_indicators))
         .route("/api/data-quality", get(get_data_quality))
+        .route("/api/metadata", get(get_metadata))
         .route(
             "/api/stores/{store_id}/indicators",
             get(get_store_indicators),

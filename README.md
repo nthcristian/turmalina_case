@@ -12,7 +12,7 @@ A separação mantém as regras de dados centralizadas e a interface simples de 
 ## Requisitos
 
 - Rust estável com Cargo.
-- Node.js 20 ou superior e npm.
+- Node.js 22.23.4 ou superior e npm.
 - Os quatro arquivos originais em `data/`, sem edição manual:
   - `turmalina_lojas.csv`
   - `turmalina_vendas_diarias.csv`
@@ -36,7 +36,7 @@ A interface espera a API em `http://127.0.0.1:3000`. Para outro endereço, defin
 
 1. **Visão geral:** duas prioridades, indicadores da rede, qualidade do dado e produtos mais vendidos das prioridades.
 2. **Lojas:** ranking explicável, filtros, comparação e detalhe.
-3. **Margem e desperdício:** descontos, margem após insumos e desperdício.
+3. **Margem e desperdício:** margem após insumos, desperdício e dias sem abertura.
 4. **Equipe e cliente:** vendas por hora, nota e espera.
 5. **Expansão e qualidade dos dados:** prontidão operacional e limites da evidência.
 

@@ -12,6 +12,31 @@ const DAYS_PER_CUSTOMER_PERIOD: i64 = 90;
 const MINIMUM_VALID_RATINGS: u32 = 10;
 const MAXIMUM_VALID_WAIT_MINUTES: u16 = 120;
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AnalysisMetadata {
+    pub current_period_start: NaiveDate,
+    pub current_period_end: NaiveDate,
+    pub previous_period_start: NaiveDate,
+    pub previous_period_end: NaiveDate,
+    pub latest_data_date: NaiveDate,
+}
+
+impl AnalysisMetadata {
+    pub fn from_daily_sales(daily_sales: &[DailySale]) -> Result<Self> {
+        let latest_data_date = latest_sale_date(daily_sales)?;
+        let current_period_start = latest_data_date - Duration::days(DAYS_PER_PERIOD - 1);
+        let previous_period_end = current_period_start - Duration::days(1);
+
+        Ok(Self {
+            current_period_start,
+            current_period_end: latest_data_date,
+            previous_period_start: previous_period_end - Duration::days(DAYS_PER_PERIOD - 1),
+            previous_period_end,
+            latest_data_date,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StoreIndicators {
     pub store_id: String,
@@ -20,6 +45,8 @@ pub struct StoreIndicators {
     pub days_without_opening: u32,
     pub net_sales_per_calendar_day: Decimal,
     pub net_sales_per_calendar_day_change_pct: Decimal,
+    /// Gross discounts granted during the current 28-day inclusive period.
+    pub current_period_discounts_amount: Decimal,
     pub ingredient_margin_pct: Decimal,
     pub ingredient_margin_change_percentage_points: Decimal,
     pub net_sales_per_team_hour: Option<Decimal>,
@@ -42,6 +69,7 @@ pub struct TopSellingProduct {
 #[derive(Default)]
 struct SalesTotals {
     net_sales: Decimal,
+    discounts: Decimal,
     ingredient_cost: Decimal,
     team_worked_hours: Decimal,
     waste_value: Decimal,
@@ -56,10 +84,11 @@ impl StoreIndicators {
         products: &[Product],
         ratings: &[Rating],
     ) -> Result<Self> {
-        let period_end = latest_sale_date(daily_sales)?;
-        let current_start = period_end - Duration::days(DAYS_PER_PERIOD - 1);
-        let previous_end = current_start - Duration::days(1);
-        let previous_start = previous_end - Duration::days(DAYS_PER_PERIOD - 1);
+        let metadata = AnalysisMetadata::from_daily_sales(daily_sales)?;
+        let current_start = metadata.current_period_start;
+        let period_end = metadata.current_period_end;
+        let previous_start = metadata.previous_period_start;
+        let previous_end = metadata.previous_period_end;
 
         let current = sales_totals(daily_sales, &store.store_id, current_start, period_end);
         let previous = sales_totals(daily_sales, &store.store_id, previous_start, previous_end);
@@ -112,6 +141,7 @@ impl StoreIndicators {
                 current_sales_per_day,
                 previous_sales_per_day,
             )?,
+            current_period_discounts_amount: current.discounts,
             ingredient_margin_pct: current_margin,
             ingredient_margin_change_percentage_points: current_margin - previous_margin,
             net_sales_per_team_hour: current_sales_per_hour,
@@ -199,9 +229,10 @@ fn intervention_score_reasons(
     }
     if uses_peer_references
         && let (Some(current_waste_pct), Some(waste_threshold)) = (
-        ratio(current_waste, current_net_sales),
-        network_waste_threshold(stores, daily_sales, current_start, period_end),
-    ) && current_waste_pct >= waste_threshold
+            ratio(current_waste, current_net_sales),
+            network_waste_threshold(stores, daily_sales, current_start, period_end),
+        )
+        && current_waste_pct >= waste_threshold
     {
         reasons.push("high_waste_vs_network".to_owned());
     }
@@ -318,6 +349,7 @@ fn sales_totals(
         })
         .fold(SalesTotals::default(), |mut totals, sale| {
             totals.net_sales += sale.gross_revenue - sale.discounts;
+            totals.discounts += sale.discounts;
             totals.ingredient_cost += sale.ingredient_cost;
             totals.team_worked_hours += sale.team_worked_hours;
             totals.waste_value += sale.waste_value;
@@ -476,6 +508,7 @@ mod tests {
         assert_eq!(indicators.intervention_score, 2);
         assert_eq!(indicators.days_without_opening, 27);
         assert_eq!(indicators.net_sales_per_calendar_day, Decimal::from(10));
+        assert_eq!(indicators.current_period_discounts_amount, Decimal::ZERO);
         assert_eq!(indicators.ingredient_margin_pct, Decimal::from(70));
         assert_eq!(indicators.waste_pct_of_net_sales, Some(Decimal::from(5)));
         assert_eq!(indicators.average_rating, Some(Decimal::from(4)));
@@ -488,7 +521,58 @@ mod tests {
                 estimated_sales: Decimal::from(200),
             }]
         );
+        assert!(
+            serde_json::to_value(&indicators)?
+                .get("current_period_discounts_amount")
+                .is_some()
+        );
 
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_exposes_exact_inclusive_28_day_periods() -> Result<()> {
+        let metadata = AnalysisMetadata::from_daily_sales(&[sale(date(2026, 6, 30))])?;
+
+        assert_eq!(metadata.current_period_start, date(2026, 6, 3));
+        assert_eq!(metadata.current_period_end, date(2026, 6, 30));
+        assert_eq!(metadata.previous_period_start, date(2026, 5, 6));
+        assert_eq!(metadata.previous_period_end, date(2026, 6, 2));
+        assert_eq!(metadata.latest_data_date, date(2026, 6, 30));
+        assert_eq!(
+            serde_json::to_value(&metadata)?["current_period_start"],
+            "2026-06-03"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sums_discounts_in_the_current_period() -> Result<()> {
+        let store = Store {
+            store_id: "LJ01".to_owned(),
+            name: "Teste".to_owned(),
+            district: "MG".to_owned(),
+            format: "rua".to_owned(),
+            model: "propria".to_owned(),
+            opening_date: date(2020, 1, 1),
+            status: true,
+        };
+        let mut current_sale = sale(date(2026, 6, 30));
+        current_sale.discounts = Decimal::from(25);
+
+        let indicators = StoreIndicators::from_general_data(
+            &store,
+            &[store.clone()],
+            &[sale(date(2026, 5, 6)), current_sale],
+            &[],
+            &[],
+        )?;
+
+        assert_eq!(
+            indicators.current_period_discounts_amount,
+            Decimal::from(25)
+        );
         Ok(())
     }
 

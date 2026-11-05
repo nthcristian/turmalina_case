@@ -29,7 +29,7 @@ O painel apresenta as medidas no mesmo período e deixa claro o que cada uma med
 
 ### 2.3 Acompanhamento da rede
 
-**Como as lojas se comportam contra a própria história recente e, apenas como contexto, contra pares de formato e maturidade?**
+**Como as lojas se comportam contra a própria história recente e, apenas como contexto, contra a rede madura inteira?**
 
 A comparação principal é sempre da loja consigo mesma. Comparações entre lojas são secundárias porque cidade, formato, modelo de propriedade e estágio de abertura são diferentes.
 
@@ -56,11 +56,11 @@ O painel contém cinco páginas:
 | `turmalina_lojas.csv` | `id_loja`, `nome_loja`, `cidade_uf`, `formato`, `modelo`, `data_abertura`, `status` | Padronizar caixa, grafias de formato/modelo/cidade e datas. `id_loja` é a chave canônica. | Nome, formato, modelo, maturidade e agrupamento contextual. |
 | `turmalina_vendas_diarias.csv` | `data`, `id_loja`, `faturamento_bruto`, `descontos`, `num_tickets`, `horas_trabalhadas_equipe`, `custo_insumos`, `valor_desperdicio` | Converter data e números; identificar duplicata por `id_loja` e `data`; completar o calendário de cada loja ativa com zero quando não houver linha de venda, pois isso representa dia sem abertura. | Prioridade, vendas, descontos, margem após insumos, produtividade e desperdício. |
 | `turmalina_itens.csv` | `id_loja`, `competencia`, `produto`, `quantidade_vendida`, `preco_medio`, `custo_unitario` | Converter preço e quantidade; manter mês de competência; não usar `custo_unitario` ausente para inferência. Não é necessário padronizar `categoria`, que fica fora do escopo. | Cinco produtos mais vendidos por quantidade; valor indicativo por produto (`quantidade_vendida × preco_medio`). |
-| `turmalina_avaliacoes.csv` | `id_avaliacao`, `id_loja`, `data`, `nota`, `canal`, `tempo_espera_min`, `comentario` | Padronizar ID da loja/canal e datas; converter notas textuais conhecidas; excluir nota inválida e espera ausente, nula ou implausível (acima de 120 min). | Nota média, espera mediana, volume de avaliações e sinal de experiência. |
+| `turmalina_avaliacoes.csv` | `id_avaliacao`, `id_loja`, `data`, `nota`, `canal`, `tempo_espera_min`, `comentario` | Padronizar ID da loja e datas; converter notas textuais conhecidas; excluir nota inválida e espera ausente, nula ou implausível (zero ou acima de 120 min). O canal é preservado como recebido e não entra nos cálculos. | Nota média, espera mediana, volume de avaliações e sinal de experiência. |
 
 ### Regras de qualidade visíveis
 
-- Duplicata de venda: manter uma única linha apenas após registrar o conflito no painel; a regra de retenção precisa ser exibida na implementação e no log de qualidade.
+- Duplicata de venda: reter a primeira ocorrência encontrada no arquivo para cada combinação de `id_loja` normalizado e data; descartar as posteriores e contar o conflito na qualidade do dado.
 - Dias sem linha de venda: completar o dia com zero e mostrar o total de dias sem abertura na janela. A ausência representa loja fechada, conforme a regra de negócio informada.
 - Custo unitário ausente no arquivo de itens: não afeta os produtos mais vendidos por quantidade; impede qualquer conclusão de custo por produto.
 - Nota textual: converter somente formatos explicitamente reconhecidos, como `3 estrelas` e `quatro`; valores não interpretáveis ficam excluídos e contados.
@@ -81,6 +81,7 @@ O painel contém cinco páginas:
 | Margem após insumos | `(vendas líquidas - custo_insumos) / vendas líquidas × 100`, % | 28 versus 28 dias | Há pressão de custos de insumo? | Não é lucro; exclui mão de obra, custos fixos e impostos. |
 | Vendas líquidas por hora de equipe | `vendas líquidas / horas_trabalhadas_equipe`, R$/hora | 28 versus 28 dias | Há sinal para revisar escala/cobertura? | Não mede custo de trabalho, qualidade do atendimento ou quadro adequado. |
 | Desperdício sobre vendas líquidas | `valor_desperdicio / vendas líquidas × 100`, % | Últimos 28 dias | Há vazamento operacional a investigar? | Depende da qualidade do registro de desperdício. |
+| Descontos | componente subtraído do faturamento bruto para apurar vendas líquidas, R$ | Últimos 28 dias versus 28 anteriores | Qual é a base usada nas métricas líquidas? | Não é exposto como indicador independente no painel. |
 | Ticket médio líquido | `vendas líquidas / num_tickets`, R$/ticket | 28 versus 28 dias | A mudança vem de valor por compra? | Não substitui uma medida de fluxo; tickets não são clientes únicos. |
 | Nota média | média das notas válidas, escala 1–5 | Últimos 90 dias, mínimo de 10 avaliações | A experiência é um sinal de prioridade? | Canais e perfis de respondente diferem; não representa toda a clientela. |
 | Espera mediana | mediana dos tempos válidos, minutos | Últimos 90 dias, mínimo de 10 valores | Há sinal de fricção no atendimento? | Totem pode falhar; não representa todas as compras. |
@@ -95,8 +96,8 @@ Uma loja ativa nas duas janelas recebe um ponto por cada condição abaixo. O es
 | Venda | queda superior a 5% em vendas líquidas/dia-calendário | Limite fixo, escolhido para não sinalizar variação pequena como crise. |
 | Margem | queda superior a 2 pontos percentuais na margem após insumos | Limite fixo, separa alteração material de oscilação pequena. |
 | Equipe | queda superior a 5% em vendas líquidas/hora | Limite fixo, alinhado ao limite de venda. |
-| Desperdício | valor no pior quartil da rede elegível | Não há meta externa fornecida; compara posição relativa, não desempenho absoluto. Lojas abertas há menos de 10 meses ficam fora das referências. |
-| Cliente | nota média ou espera mediana no pior quartil da rede com amostra válida | Não há padrão de serviço fornecido; só é sinal contextual. Lojas abertas há menos de 10 meses ficam fora das referências. |
+| Desperdício | valor no pior quartil da rede madura inteira | Não há meta externa fornecida; compara posição relativa, não desempenho absoluto. Lojas abertas há menos de 10 meses e inativas ficam fora das referências. |
+| Cliente | nota média ou espera mediana no pior quartil da rede madura inteira, com amostra válida | Não há padrão de serviço fornecido; só é sinal contextual. Lojas abertas há menos de 10 meses e inativas ficam fora das referências. |
 
 O painel recomenda, no máximo, duas lojas com maior escore. Se não houver duas lojas com sinal material, ele informa que não há evidência suficiente para preencher artificialmente a capacidade de intervenção.
 
@@ -127,7 +128,7 @@ O painel recomenda, no máximo, duas lojas com maior escore. Se não houver duas
 
 ```text
 +--------------------------------------------------------------------------------+
-| Filtros: período | formato | modelo | status de abertura                      |
+| Período fixo: últimos 28 dias disponíveis vs. 28 anteriores | formato | modelo |
 +--------------------------------------------------------------------------------+
 | Ranking explicável: loja | escore | dias fechada | venda/dia | variação | sinais |
 +--------------------------------------+-----------------------------------------+
@@ -135,6 +136,43 @@ O painel recomenda, no máximo, duas lojas com maior escore. Se não houver duas
 |                                      | série diária de vendas líquidas          |
 |                                      | cartões: ticket, margem, horas, perda   |
 |                                      | nota, espera, tamanho da amostra         |
++--------------------------------------+-----------------------------------------+
+```
+
+### 7.3 Margem e desperdício
+
+```text
++--------------------------------------------------------------------------------+
+| Margem e desperdício | Últimos 28 dias disponíveis vs. 28 anteriores           |
++--------------------------------------------------------------------------------+
+| Margem média após insumos | Desperdício médio sobre vendas líquidas | Dias sem abertura |
++--------------------------------------------------------------------------------+
+| Comparação por loja: vendas/dia | variação | margem | desperdício | fechada |
++--------------------------------------------------------------------------------+
+```
+
+### 7.4 Equipe e cliente
+
+```text
++--------------------------------------------------------------------------------+
+| Equipe e cliente | Últimos 28 dias; cliente: últimos 90 dias                  |
++--------------------------------------------------------------------------------+
+| Vendas por hora (média) | Nota média | Lojas com amostra insuficiente          |
++--------------------------------------------------------------------------------+
+| Comparação por loja: vendas/dia | variação | vendas/hora | cliente | fechada |
++--------------------------------------------------------------------------------+
+```
+
+### 7.5 Expansão e qualidade dos dados
+
+```text
++--------------------------------------------------------------------------------+
+| Expansão e qualidade | Última venda disponível define os períodos              |
++--------------------------------------------------------------------------------+
+| Checklist: lojas recentes | dias sem abertura | margem após insumos não é lucro |
+| Dados ausentes para decidir: investimento, custos fixos, demanda, canibalização |
++--------------------------------------+-----------------------------------------+
+| Qualidade: duplicatas e exclusões    | Limites da evidência                    |
 +--------------------------------------+-----------------------------------------+
 ```
 

@@ -27,6 +27,7 @@ dependencies = [
  "csv",
  "rust_decimal",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tower-http",

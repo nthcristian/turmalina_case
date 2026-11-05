@@ -9,24 +9,35 @@ type Store = {
     data_abertura: string;
     status: boolean;
 };
-type Product = { name: string; quantity_sold: number; estimated_sales: string };
+type Metric = string | number;
+type Product = {
+    name: string;
+    quantity_sold: number;
+    estimated_sales: Metric;
+};
 type Indicator = {
     store_id: string;
     intervention_score: number;
     score_reasons: string[];
     days_without_opening: number;
-    net_sales_per_calendar_day: string;
-    net_sales_per_calendar_day_change_pct: string;
-    ingredient_margin_pct: string;
-    ingredient_margin_change_percentage_points: string;
-    net_sales_per_team_hour: string | null;
-    net_sales_per_team_hour_change_pct: string | null;
-    waste_pct_of_net_sales: string | null;
-    average_net_ticket: string | null;
+    net_sales_per_calendar_day: Metric;
+    net_sales_per_calendar_day_change_pct: Metric;
+    ingredient_margin_pct: Metric;
+    ingredient_margin_change_percentage_points: Metric;
+    net_sales_per_team_hour: Metric | null;
+    net_sales_per_team_hour_change_pct: Metric | null;
+    waste_pct_of_net_sales: Metric | null;
+    average_net_ticket: Metric | null;
     valid_rating_count: number;
-    average_rating: string | null;
+    average_rating: Metric | null;
     median_wait_time_minutes: number | null;
     top_selling_products: Product[];
+    current_period_discounts_amount: Metric;
+    discounts_total?: Metric;
+    discounts_pct_of_gross_sales?: Metric;
+    discounts_change_pct?: Metric;
+    discounts_change_percentage_points?: Metric;
+    [key: `discounts_${string}`]: Metric | null | undefined;
 };
 type DashboardStore = Store & { indicator: Indicator };
 type DataQuality = {
@@ -35,7 +46,19 @@ type DataQuality = {
     implausible_wait_times: number;
     missing_unit_costs: number;
 };
-type DailySalesPoint = { date: string; net_sales: string };
+type DailySalesPoint = { date: string; net_sales: Metric };
+type DashboardMetadata = {
+    current_period_start?: string;
+    current_period_end?: string;
+    previous_period_start?: string;
+    previous_period_end?: string;
+    latest_data_date?: string;
+    data_date?: string;
+    period_start?: string;
+    period_end?: string;
+    comparison_period_start?: string;
+    comparison_period_end?: string;
+};
 type Tab = "overview" | "stores" | "margin" | "team" | "expansion";
 
 const API_URL = import.meta.env.PUBLIC_API_URL ?? "http://127.0.0.1:3000";
@@ -45,6 +68,18 @@ const money = new Intl.NumberFormat("pt-BR", {
     maximumFractionDigits: 0,
 });
 const number = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
+const date = new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+});
+const fallbackPeriod = {
+    currentStart: "2026-06-03",
+    currentEnd: "2026-06-30",
+    previousStart: "2026-05-06",
+    previousEnd: "2026-06-02",
+    dataDate: "2026-06-30",
+};
 const tabs: Array<[Tab, string]> = [
     ["overview", "Visão geral"],
     ["stores", "Lojas"],
@@ -53,7 +88,7 @@ const tabs: Array<[Tab, string]> = [
     ["expansion", "Expansão e qualidade"],
 ];
 
-function value(input: string | null | undefined) {
+function value(input: Metric | null | undefined) {
     const parsed = Number(input);
     return input === null || input === undefined || Number.isNaN(parsed)
         ? null
@@ -65,19 +100,57 @@ function average(values: Array<number | null>) {
         ? valid.reduce((sum, item) => sum + item, 0) / valid.length
         : null;
 }
-function percent(input: string | null, suffix = "%") {
+function percent(input: Metric | null, suffix = "%") {
     const metric = value(input);
     return metric === null
         ? "—"
         : `${metric > 0 ? "+" : ""}${number.format(metric)}${suffix}`;
 }
-function metricClass(input: string | null, inverse = false) {
+function metricClass(input: Metric | null, inverse = false) {
     const metric = value(input);
     return metric === null || metric === 0
         ? "text-slate-500"
         : (inverse ? metric < 0 : metric > 0)
           ? "text-emerald-700"
           : "text-rose-700";
+}
+
+function formatDate(input: string) {
+    return date.format(new Date(`${input}T00:00:00`));
+}
+function getMetadata(input: unknown): DashboardMetadata | null {
+    if (!input || typeof input !== "object") return null;
+    const data = input as Record<string, unknown>;
+    const current = data.current_period as Record<string, unknown> | undefined;
+    const previous = data.previous_period as
+        Record<string, unknown> | undefined;
+    const string = (item: unknown) =>
+        typeof item === "string" && item ? item : undefined;
+    return {
+        current_period_start: string(
+            data.current_period_start ?? data.period_start ?? current?.start,
+        ),
+        current_period_end: string(
+            data.current_period_end ?? data.period_end ?? current?.end,
+        ),
+        previous_period_start: string(
+            data.previous_period_start ??
+                data.comparison_period_start ??
+                previous?.start,
+        ),
+        previous_period_end: string(
+            data.previous_period_end ??
+                data.comparison_period_end ??
+                previous?.end,
+        ),
+        latest_data_date: string(data.latest_data_date ?? data.data_as_of),
+        data_date: string(data.data_date),
+    };
+}
+function isRecentStore(openingDate: string, dataDate: string) {
+    const cutoff = new Date(`${dataDate}T00:00:00`);
+    cutoff.setMonth(cutoff.getMonth() - 10);
+    return new Date(`${openingDate}T00:00:00`) > cutoff;
 }
 const reasonLabels: Record<string, string> = {
     sales_per_day_decline: "Queda material em vendas/dia",
@@ -99,6 +172,7 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [quality, setQuality] = useState<DataQuality | null>(null);
+    const [metadata, setMetadata] = useState<DashboardMetadata | null>(null);
     const [salesSeries, setSalesSeries] = useState<DailySalesPoint[]>([]);
     const [tab, setTab] = useState<Tab>("overview");
     const [format, setFormat] = useState("all");
@@ -108,12 +182,17 @@ export default function Dashboard() {
         setLoading(true);
         setError(null);
         try {
-            const [storesResponse, indicatorsResponse, qualityResponse] =
-                await Promise.all([
-                    fetch(`${API_URL}/api/stores`),
-                    fetch(`${API_URL}/api/indicators`),
-                    fetch(`${API_URL}/api/data-quality`),
-                ]);
+            const [
+                storesResponse,
+                indicatorsResponse,
+                qualityResponse,
+                metadataResponse,
+            ] = await Promise.all([
+                fetch(`${API_URL}/api/stores`),
+                fetch(`${API_URL}/api/indicators`),
+                fetch(`${API_URL}/api/data-quality`),
+                fetch(`${API_URL}/api/metadata`).catch(() => null),
+            ]);
             if (
                 !storesResponse.ok ||
                 !indicatorsResponse.ok ||
@@ -125,6 +204,9 @@ export default function Dashboard() {
                 indicatorsResponse.json(),
                 qualityResponse.json(),
             ])) as [Store[], Indicator[], DataQuality];
+            const metadataData = metadataResponse?.ok
+                ? getMetadata(await metadataResponse.json())
+                : null;
             const byId = new Map(
                 storeData.map((store) => [store.id_loja.toUpperCase(), store]),
             );
@@ -134,6 +216,7 @@ export default function Dashboard() {
             });
             setStores(joined);
             setQuality(qualityData);
+            setMetadata(metadataData);
             setSelectedId((current) => current || joined[0]?.id_loja || "");
         } catch (requestError) {
             setError(
@@ -184,6 +267,12 @@ export default function Dashboard() {
     const productivity = average(
         stores.map((store) => value(store.indicator.net_sales_per_team_hour)),
     );
+    const currentPeriodDiscounts = stores.reduce(
+        (total, store) =>
+            total +
+            (value(store.indicator.current_period_discounts_amount) ?? 0),
+        0,
+    );
     const rating = average(
         stores.map((store) => value(store.indicator.average_rating)),
     );
@@ -194,8 +283,31 @@ export default function Dashboard() {
     const lowSample = stores.filter(
         (store) => store.indicator.valid_rating_count < 10,
     ).length;
-    const recent = stores.filter(
-        (store) => new Date(store.data_abertura) >= new Date("2025-08-30"),
+    const period = {
+        currentStart:
+            metadata?.current_period_start ??
+            salesSeries.at(-28)?.date ??
+            fallbackPeriod.currentStart,
+        currentEnd:
+            metadata?.current_period_end ??
+            salesSeries.at(-1)?.date ??
+            fallbackPeriod.currentEnd,
+        previousStart:
+            metadata?.previous_period_start ??
+            salesSeries[0]?.date ??
+            fallbackPeriod.previousStart,
+        previousEnd:
+            metadata?.previous_period_end ??
+            salesSeries.at(-29)?.date ??
+            fallbackPeriod.previousEnd,
+        dataDate:
+            metadata?.latest_data_date ??
+            metadata?.data_date ??
+            salesSeries.at(-1)?.date ??
+            fallbackPeriod.dataDate,
+    };
+    const recent = stores.filter((store) =>
+        isRecentStore(store.data_abertura, period.dataDate),
     ).length;
     return (
         <main className="min-h-screen bg-[#f3f0e9] px-4 py-5 text-[#14261f] sm:px-7 lg:px-10">
@@ -209,8 +321,11 @@ export default function Dashboard() {
                             Turmalina Café
                         </h1>
                         <p className="mt-2 text-sm text-slate-600">
-                            Painel de decisão semanal · últimos 28 dias versus
-                            período anterior
+                            Período: {formatDate(period.currentStart)} a{" "}
+                            {formatDate(period.currentEnd)} versus{" "}
+                            {formatDate(period.previousStart)} a{" "}
+                            {formatDate(period.previousEnd)} · dados até{" "}
+                            {formatDate(period.dataDate)}
                         </p>
                     </div>
                     <button
@@ -387,7 +502,7 @@ export default function Dashboard() {
                                     title="Margem e desperdício"
                                     note="Margem após insumos não é lucro: não inclui mão de obra, aluguel, impostos ou custos fixos."
                                 />
-                                <div className="mt-5 grid gap-4 md:grid-cols-3">
+                                <div className="mt-5 grid gap-4 md:grid-cols-4">
                                     <Card
                                         label="Margem média"
                                         value={
@@ -405,6 +520,13 @@ export default function Dashboard() {
                                                 : `${number.format(waste)}%`
                                         }
                                         note="Sobre vendas líquidas"
+                                    />
+                                    <Card
+                                        label="Descontos concedidos"
+                                        value={money.format(
+                                            currentPeriodDiscounts,
+                                        )}
+                                        note="Total na janela atual de 28 dias"
                                     />
                                     <Card
                                         label="Dias sem abertura"
@@ -486,6 +608,14 @@ export default function Dashboard() {
                                         lowSample={lowSample}
                                         closedDays={closedDays}
                                         quality={quality}
+                                    />
+                                    <RecentStoreEvolution
+                                        stores={stores.filter((store) =>
+                                            isRecentStore(
+                                                store.data_abertura,
+                                                period.dataDate,
+                                            ),
+                                        )}
                                     />
                                 </div>
                             </section>
@@ -598,10 +728,10 @@ function Quality({
                     value={`${closedDays} dias`}
                 />
                 <Data
-                    label="Duplicatas de venda retidas"
+                    label="Duplicatas de venda detectadas"
                     value={
                         quality
-                            ? `${quality.duplicate_daily_sales} linha(s)`
+                            ? `${quality.duplicate_daily_sales} linha(s); primeira ocorrência mantida`
                             : "—"
                     }
                 />
@@ -626,6 +756,77 @@ function Quality({
                     }
                 />
             </dl>
+        </article>
+    );
+}
+function RecentStoreEvolution({ stores }: { stores: DashboardStore[] }) {
+    return (
+        <article className="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+            <Heading
+                eyebrow="Lojas recentes"
+                title="Evolução operacional disponível"
+                note="Variação do período atual contra os 28 dias anteriores; interpretar sem comparação com a rede madura."
+            />
+            {stores.length ? (
+                <div className="mt-5 overflow-x-auto">
+                    <table className="w-full min-w-[600px] text-left text-sm">
+                        <thead className="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th className="pb-3 pr-4">Loja</th>
+                                <th className="px-3 pb-3">Abertura</th>
+                                <th className="px-3 pb-3">Vendas/dia</th>
+                                <th className="px-3 pb-3">Δ margem</th>
+                                <th className="px-3 pb-3">Δ vendas/hora</th>
+                                <th className="px-3 pb-3">Dias fechada</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                            {stores.map((store) => {
+                                const i = store.indicator;
+                                return (
+                                    <tr key={store.id_loja}>
+                                        <td className="py-3 pr-4 font-semibold text-[#173c30]">
+                                            {store.nome_loja}
+                                        </td>
+                                        <td className="px-3 py-3">
+                                            {formatDate(store.data_abertura)}
+                                        </td>
+                                        <td
+                                            className={`px-3 py-3 font-medium ${metricClass(i.net_sales_per_calendar_day_change_pct)}`}
+                                        >
+                                            {percent(
+                                                i.net_sales_per_calendar_day_change_pct,
+                                            )}
+                                        </td>
+                                        <td
+                                            className={`px-3 py-3 font-medium ${metricClass(i.ingredient_margin_change_percentage_points)}`}
+                                        >
+                                            {percent(
+                                                i.ingredient_margin_change_percentage_points,
+                                                " pp",
+                                            )}
+                                        </td>
+                                        <td
+                                            className={`px-3 py-3 font-medium ${metricClass(i.net_sales_per_team_hour_change_pct)}`}
+                                        >
+                                            {percent(
+                                                i.net_sales_per_team_hour_change_pct,
+                                            )}
+                                        </td>
+                                        <td className="px-3 py-3">
+                                            {i.days_without_opening}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            ) : (
+                <p className="mt-5 text-sm text-slate-500">
+                    Não há lojas com menos de 10 meses de operação nesta data.
+                </p>
+            )}
         </article>
     );
 }
@@ -699,7 +900,10 @@ function PriorityCard({
                             >
                                 <span>{product.name}</span>
                                 <b className="text-[#cdbb98]">
-                                    {number.format(product.quantity_sold)}
+                                    {number.format(product.quantity_sold)} ·{" "}
+                                    {money.format(
+                                        value(product.estimated_sales) ?? 0,
+                                    )}
                                 </b>
                             </li>
                         ))}
@@ -786,6 +990,13 @@ function StoreDetail({
                     value={`${number.format(value(i.ingredient_margin_pct) ?? 0)}%`}
                 />
                 <Data
+                    label="Variação de margem"
+                    value={percent(
+                        i.ingredient_margin_change_percentage_points,
+                        " pp",
+                    )}
+                />
+                <Data
                     label="Desperdício"
                     value={
                         i.waste_pct_of_net_sales
@@ -796,6 +1007,46 @@ function StoreDetail({
                 <Data
                     label="Fechada"
                     value={`${i.days_without_opening} dias`}
+                />
+                <Data
+                    label="Ticket médio"
+                    value={
+                        i.average_net_ticket
+                            ? money.format(value(i.average_net_ticket) ?? 0)
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Vendas por hora"
+                    value={
+                        i.net_sales_per_team_hour
+                            ? `${money.format(value(i.net_sales_per_team_hour) ?? 0)}/h`
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Variação vendas/h"
+                    value={percent(i.net_sales_per_team_hour_change_pct)}
+                />
+                <Data
+                    label="Espera mediana"
+                    value={
+                        i.median_wait_time_minutes === null
+                            ? "—"
+                            : `${i.median_wait_time_minutes} min`
+                    }
+                />
+                <Data
+                    label="Nota média"
+                    value={
+                        i.average_rating
+                            ? `${number.format(value(i.average_rating) ?? 0)}/5`
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Amostra de avaliações"
+                    value={`${i.valid_rating_count} válidas`}
                 />
             </dl>
             <p className="mt-4 text-xs font-semibold text-[#765a38]">
@@ -831,7 +1082,7 @@ function DailySalesStrip({ points }: { points: DailySalesPoint[] }) {
                             <div
                                 className="w-full rounded-t bg-[#b47a37] transition group-hover:bg-[#80501d]"
                                 style={{
-                                    height: `${Math.max((netSales / highest) * 100, 2)}%`,
+                                    height: `${(netSales / highest) * 100}%`,
                                 }}
                             />
                             <span className="sr-only">
@@ -842,8 +1093,7 @@ function DailySalesStrip({ points }: { points: DailySalesPoint[] }) {
                 })}
             </div>
             <p className="mt-2 text-[11px] text-[#765a38]">
-                Cada barra representa um dia; ausência de venda aparece como
-                barra mínima.
+                Cada barra representa um dia; ausência de venda não forma barra.
             </p>
         </div>
     );
@@ -873,23 +1123,32 @@ function StoreTable({
                 role="region"
                 aria-label="Tabela comparativa de lojas"
             >
-                <table className="w-full min-w-[760px] text-left text-sm">
+                <table className="w-full min-w-[1000px] text-left text-sm">
                     <thead className="bg-[#f8f7f3] text-xs uppercase tracking-wide text-slate-500">
                         <tr>
                             <th className="px-5 py-3">Loja</th>
                             <th className="px-3 py-3">Escore</th>
                             <th className="px-3 py-3">Vendas/dia</th>
                             <th className="px-3 py-3">Variação</th>
+                            <th className="px-3 py-3">Ticket médio</th>
                             {showMargin && (
                                 <>
                                     <th className="px-3 py-3">Margem</th>
+                                    <th className="px-3 py-3">Δ margem</th>
+                                    <th className="px-3 py-3">Descontos</th>
                                     <th className="px-3 py-3">Desperdício</th>
                                 </>
                             )}
                             {showTeam && (
                                 <>
                                     <th className="px-3 py-3">Vendas/hora</th>
-                                    <th className="px-3 py-3">Cliente</th>
+                                    <th className="px-3 py-3">Δ vendas/hora</th>
+                                    <th className="px-3 py-3">
+                                        Cliente / amostra
+                                    </th>
+                                    <th className="px-3 py-3">
+                                        Espera mediana
+                                    </th>
                                 </>
                             )}
                             <th className="px-5 py-3">Fechada</th>
@@ -928,6 +1187,14 @@ function StoreTable({
                                             i.net_sales_per_calendar_day_change_pct,
                                         )}
                                     </td>
+                                    <td className="px-3 py-4">
+                                        {i.average_net_ticket
+                                            ? money.format(
+                                                  value(i.average_net_ticket) ??
+                                                      0,
+                                              )
+                                            : "—"}
+                                    </td>
                                     {showMargin && (
                                         <>
                                             <td className="px-3 py-4">
@@ -937,6 +1204,21 @@ function StoreTable({
                                                     ) ?? 0,
                                                 )}
                                                 %
+                                            </td>
+                                            <td
+                                                className={`px-3 py-4 font-medium ${metricClass(i.ingredient_margin_change_percentage_points)}`}
+                                            >
+                                                {percent(
+                                                    i.ingredient_margin_change_percentage_points,
+                                                    " pp",
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-4">
+                                                {money.format(
+                                                    value(
+                                                        i.current_period_discounts_amount,
+                                                    ) ?? 0,
+                                                )}
                                             </td>
                                             <td className="px-3 py-4">
                                                 {i.waste_pct_of_net_sales
@@ -952,10 +1234,23 @@ function StoreTable({
                                                     ? `${money.format(value(i.net_sales_per_team_hour) ?? 0)}/h`
                                                     : "—"}
                                             </td>
+                                            <td
+                                                className={`px-3 py-4 font-medium ${metricClass(i.net_sales_per_team_hour_change_pct)}`}
+                                            >
+                                                {percent(
+                                                    i.net_sales_per_team_hour_change_pct,
+                                                )}
+                                            </td>
                                             <td className="px-3 py-4">
                                                 {i.average_rating
-                                                    ? `${number.format(value(i.average_rating) ?? 0)}/5`
-                                                    : "Amostra insuf."}
+                                                    ? `${number.format(value(i.average_rating) ?? 0)}/5 · n=${i.valid_rating_count}`
+                                                    : `n=${i.valid_rating_count}`}
+                                            </td>
+                                            <td className="px-3 py-4">
+                                                {i.median_wait_time_minutes ===
+                                                null
+                                                    ? "—"
+                                                    : `${i.median_wait_time_minutes} min`}
                                             </td>
                                         </>
                                     )}
