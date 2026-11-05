@@ -1,334 +1,973 @@
 import { useEffect, useState } from "react";
 
 type Store = {
-  id_loja: string;
-  nome_loja: string;
-  cidade_uf: string;
-  formato: string;
-  modelo: string;
-  data_abertura: string;
-  status: boolean;
+    id_loja: string;
+    nome_loja: string;
+    cidade_uf: string;
+    formato: string;
+    modelo: string;
+    data_abertura: string;
+    status: boolean;
 };
-
-type Product = {
-  name: string;
-  quantity_sold: number;
-  estimated_sales: string;
-};
-
+type Product = { name: string; quantity_sold: number; estimated_sales: string };
 type Indicator = {
-  store_id: string;
-  intervention_score: number;
-  days_without_opening: number;
-  net_sales_per_calendar_day: string;
-  net_sales_per_calendar_day_change_pct: string;
-  ingredient_margin_pct: string;
-  ingredient_margin_change_percentage_points: string;
-  net_sales_per_team_hour: string | null;
-  net_sales_per_team_hour_change_pct: string | null;
-  waste_pct_of_net_sales: string | null;
-  average_net_ticket: string | null;
-  valid_rating_count: number;
-  average_rating: string | null;
-  median_wait_time_minutes: number | null;
-  top_selling_products: Product[];
+    store_id: string;
+    intervention_score: number;
+    score_reasons: string[];
+    days_without_opening: number;
+    net_sales_per_calendar_day: string;
+    net_sales_per_calendar_day_change_pct: string;
+    ingredient_margin_pct: string;
+    ingredient_margin_change_percentage_points: string;
+    net_sales_per_team_hour: string | null;
+    net_sales_per_team_hour_change_pct: string | null;
+    waste_pct_of_net_sales: string | null;
+    average_net_ticket: string | null;
+    valid_rating_count: number;
+    average_rating: string | null;
+    median_wait_time_minutes: number | null;
+    top_selling_products: Product[];
 };
-
 type DashboardStore = Store & { indicator: Indicator };
+type DataQuality = {
+    duplicate_daily_sales: number;
+    invalid_ratings: number;
+    implausible_wait_times: number;
+    missing_unit_costs: number;
+};
+type DailySalesPoint = { date: string; net_sales: string };
+type Tab = "overview" | "stores" | "margin" | "team" | "expansion";
 
 const API_URL = import.meta.env.PUBLIC_API_URL ?? "http://127.0.0.1:3000";
-
 const money = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-  maximumFractionDigits: 0,
+    style: "currency",
+    currency: "BRL",
+    maximumFractionDigits: 0,
 });
-
 const number = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
+const tabs: Array<[Tab, string]> = [
+    ["overview", "Visão geral"],
+    ["stores", "Lojas"],
+    ["margin", "Margem e desperdício"],
+    ["team", "Equipe e cliente"],
+    ["expansion", "Expansão e qualidade"],
+];
 
-function value(input: string | null): number | null {
-  return input === null ? null : Number(input);
+function value(input: string | null | undefined) {
+    const parsed = Number(input);
+    return input === null || input === undefined || Number.isNaN(parsed)
+        ? null
+        : parsed;
 }
-
-function signedPercent(input: string | null, suffix = "%") {
-  const metric = value(input);
-  if (metric === null || Number.isNaN(metric)) return "—";
-  return `${metric > 0 ? "+" : ""}${number.format(metric)}${suffix}`;
+function average(values: Array<number | null>) {
+    const valid = values.filter((item): item is number => item !== null);
+    return valid.length
+        ? valid.reduce((sum, item) => sum + item, 0) / valid.length
+        : null;
 }
-
+function percent(input: string | null, suffix = "%") {
+    const metric = value(input);
+    return metric === null
+        ? "—"
+        : `${metric > 0 ? "+" : ""}${number.format(metric)}${suffix}`;
+}
 function metricClass(input: string | null, inverse = false) {
-  const metric = value(input);
-  if (metric === null || metric === 0) return "text-slate-500";
-  const positive = inverse ? metric < 0 : metric > 0;
-  return positive ? "text-emerald-700" : "text-rose-700";
+    const metric = value(input);
+    return metric === null || metric === 0
+        ? "text-slate-500"
+        : (inverse ? metric < 0 : metric > 0)
+          ? "text-emerald-700"
+          : "text-rose-700";
 }
+const reasonLabels: Record<string, string> = {
+    sales_per_day_decline: "Queda material em vendas/dia",
+    ingredient_margin_decline: "Queda material na margem após insumos",
+    sales_per_team_hour_decline: "Queda material em vendas por hora",
+    high_waste_vs_network: "Desperdício no pior quartil da rede madura",
+    poor_customer_experience_vs_network:
+        "Experiência de cliente no pior quartil da rede madura",
+};
 
-function average(values: Array<number | null>): number | null {
-  const available = values.filter((metric): metric is number => metric !== null && !Number.isNaN(metric));
-  return available.length ? available.reduce((total, metric) => total + metric, 0) / available.length : null;
+function reasons(indicator: Indicator) {
+    return indicator.score_reasons.map(
+        (reason) => reasonLabels[reason] ?? reason,
+    );
 }
 
 export default function Dashboard() {
-  const [stores, setStores] = useState<DashboardStore[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  async function loadDashboard() {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const [storesResponse, indicatorsResponse] = await Promise.all([
-        fetch(`${API_URL}/api/stores`),
-        fetch(`${API_URL}/api/indicators`),
-      ]);
-      if (!storesResponse.ok || !indicatorsResponse.ok) {
-        throw new Error("A API não respondeu com os dados esperados.");
-      }
-
-      const [storeData, indicatorData] = (await Promise.all([
-        storesResponse.json(),
-        indicatorsResponse.json(),
-      ])) as [Store[], Indicator[]];
-      const storesById = new Map(storeData.map((store) => [store.id_loja.toUpperCase(), store]));
-
-      setStores(
-        indicatorData.flatMap((indicator) => {
-          const store = storesById.get(indicator.store_id.toUpperCase());
-          return store ? [{ ...store, indicator }] : [];
-        }),
-      );
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar o painel.");
-    } finally {
-      setLoading(false);
+    const [stores, setStores] = useState<DashboardStore[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [quality, setQuality] = useState<DataQuality | null>(null);
+    const [salesSeries, setSalesSeries] = useState<DailySalesPoint[]>([]);
+    const [tab, setTab] = useState<Tab>("overview");
+    const [format, setFormat] = useState("all");
+    const [model, setModel] = useState("all");
+    const [selectedId, setSelectedId] = useState("");
+    async function loadDashboard() {
+        setLoading(true);
+        setError(null);
+        try {
+            const [storesResponse, indicatorsResponse, qualityResponse] =
+                await Promise.all([
+                    fetch(`${API_URL}/api/stores`),
+                    fetch(`${API_URL}/api/indicators`),
+                    fetch(`${API_URL}/api/data-quality`),
+                ]);
+            if (
+                !storesResponse.ok ||
+                !indicatorsResponse.ok ||
+                !qualityResponse.ok
+            )
+                throw new Error("A API não respondeu com os dados esperados.");
+            const [storeData, indicatorData, qualityData] = (await Promise.all([
+                storesResponse.json(),
+                indicatorsResponse.json(),
+                qualityResponse.json(),
+            ])) as [Store[], Indicator[], DataQuality];
+            const byId = new Map(
+                storeData.map((store) => [store.id_loja.toUpperCase(), store]),
+            );
+            const joined = indicatorData.flatMap((indicator) => {
+                const store = byId.get(indicator.store_id.toUpperCase());
+                return store ? [{ ...store, indicator }] : [];
+            });
+            setStores(joined);
+            setQuality(qualityData);
+            setSelectedId((current) => current || joined[0]?.id_loja || "");
+        } catch (requestError) {
+            setError(
+                requestError instanceof Error
+                    ? requestError.message
+                    : "Não foi possível carregar o painel.",
+            );
+        } finally {
+            setLoading(false);
+        }
     }
-  }
-
-  useEffect(() => {
-    void loadDashboard();
-  }, []);
-
-  const priorities = stores.slice(0, 2);
-  const salesPerDay = stores.reduce((total, store) => total + value(store.indicator.net_sales_per_calendar_day)!, 0);
-  const averageMargin = stores.length
-    ? stores.reduce((total, store) => total + value(store.indicator.ingredient_margin_pct)!, 0) / stores.length
-    : 0;
-  const closedDays = stores.reduce((total, store) => total + store.indicator.days_without_opening, 0);
-  const averageTicket = average(stores.map((store) => value(store.indicator.average_net_ticket)));
-  const averageProductivity = average(stores.map((store) => value(store.indicator.net_sales_per_team_hour)));
-  const averageWaste = average(stores.map((store) => value(store.indicator.waste_pct_of_net_sales)));
-  const ratedStores = stores.filter((store) => store.indicator.average_rating !== null);
-  const averageRating = average(ratedStores.map((store) => value(store.indicator.average_rating)));
-  const averageWait = average(stores.map((store) => store.indicator.median_wait_time_minutes));
-  const lowSampleStores = stores.filter((store) => store.indicator.valid_rating_count < 10);
-  const recentStores = stores.filter((store) => new Date(store.data_abertura) >= new Date("2025-08-30"));
-
-  return (
-    <main className="min-h-screen bg-[#f3f0e9] px-4 py-5 text-[#14261f] sm:px-7 lg:px-10">
-      <div className="mx-auto max-w-7xl">
-        <header className="mb-7 flex flex-col gap-5 border-b border-[#d6d0c4] pb-6 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="mb-2 text-xs font-bold uppercase tracking-[0.22em] text-[#5a7669]">Operações · segunda-feira</p>
-            <h1 className="font-serif text-4xl tracking-tight text-[#12362c] sm:text-5xl">Turmalina Café</h1>
-            <p className="mt-2 text-sm text-slate-600">Painel de decisão semanal · últimos 28 dias versus período anterior</p>
-          </div>
-          <button
-            className="inline-flex items-center justify-center gap-2 rounded-full border border-[#0c5d4d] bg-[#0c5d4d] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#084b3d] disabled:cursor-not-allowed disabled:opacity-60"
-            onClick={() => void loadDashboard()}
-            disabled={loading}
-          >
-            <span className="text-lg leading-none">↻</span> Atualizar dados
-          </button>
-        </header>
-
-        <nav className="mb-7 flex gap-2 overflow-x-auto pb-1 text-sm font-semibold text-[#436457]" aria-label="Seções do painel">
-          {[
-            ["#resumo", "Resumo"],
-            ["#prioridades", "Prioridades"],
-            ["#operacao", "Operação"],
-            ["#cliente", "Cliente"],
-            ["#expansao", "Expansão"],
-            ["#lojas", "Lojas"],
-          ].map(([href, label]) => <a className="whitespace-nowrap rounded-full bg-white px-4 py-2 shadow-sm transition hover:bg-[#dce9e1]" href={href} key={href}>{label}</a>)}
-        </nav>
-
-        {loading && <div className="rounded-2xl bg-white p-10 text-center text-slate-500 shadow-sm">Lendo os dados da operação...</div>}
-
-        {error && (
-          <section className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-950">
-            <p className="font-semibold">Não foi possível carregar o painel</p>
-            <p className="mt-1 text-sm text-rose-800">{error} Confirme se a API está em execução em `{API_URL}`.</p>
-          </section>
-        )}
-
-        {!loading && !error && (
-          <>
-            <section className="grid gap-4 md:grid-cols-3" id="resumo">
-              <SummaryCard label="Vendas líquidas/dia" value={money.format(salesPerDay)} note={`${stores.length} lojas ativas`} />
-              <SummaryCard label="Margem após insumos" value={`${number.format(averageMargin)}%`} note="Média simples da rede" />
-              <SummaryCard label="Dias sem abertura" value={String(closedDays)} note="No período analisado" highlight={closedDays > 0} />
-            </section>
-
-            <section className="mt-8" id="prioridades">
-              <div className="mb-4 flex items-end justify-between">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#8a5a25]">Capacidade de intervenção</p>
-                  <h2 className="mt-1 font-serif text-3xl text-[#173c30]">Duas lojas para olhar agora</h2>
+    useEffect(() => {
+        void loadDashboard();
+    }, []);
+    const priorities = stores
+        .filter((store) => store.indicator.intervention_score > 0)
+        .slice(0, 2);
+    const filtered = stores.filter(
+        (store) =>
+            (format === "all" || store.formato === format) &&
+            (model === "all" || store.modelo === model),
+    );
+    const selected =
+        filtered.find((store) => store.id_loja === selectedId) ?? filtered[0];
+    useEffect(() => {
+        if (!selected) {
+            setSalesSeries([]);
+            return;
+        }
+        void fetch(
+            `${API_URL}/api/stores/${encodeURIComponent(selected.id_loja)}/sales`,
+        )
+            .then((response) => (response.ok ? response.json() : []))
+            .then((points: DailySalesPoint[]) => setSalesSeries(points))
+            .catch(() => setSalesSeries([]));
+    }, [selected]);
+    const salesPerDay = stores.reduce(
+        (total, store) =>
+            total + (value(store.indicator.net_sales_per_calendar_day) ?? 0),
+        0,
+    );
+    const margin = average(
+        stores.map((store) => value(store.indicator.ingredient_margin_pct)),
+    );
+    const waste = average(
+        stores.map((store) => value(store.indicator.waste_pct_of_net_sales)),
+    );
+    const productivity = average(
+        stores.map((store) => value(store.indicator.net_sales_per_team_hour)),
+    );
+    const rating = average(
+        stores.map((store) => value(store.indicator.average_rating)),
+    );
+    const closedDays = stores.reduce(
+        (total, store) => total + store.indicator.days_without_opening,
+        0,
+    );
+    const lowSample = stores.filter(
+        (store) => store.indicator.valid_rating_count < 10,
+    ).length;
+    const recent = stores.filter(
+        (store) => new Date(store.data_abertura) >= new Date("2025-08-30"),
+    ).length;
+    return (
+        <main className="min-h-screen bg-[#f3f0e9] px-4 py-5 text-[#14261f] sm:px-7 lg:px-10">
+            <div className="mx-auto max-w-7xl">
+                <header className="mb-6 flex flex-col gap-4 border-b border-[#d6d0c4] pb-5 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                        <p className="mb-2 text-xs font-bold uppercase tracking-[0.22em] text-[#5a7669]">
+                            Operações · segunda-feira
+                        </p>
+                        <h1 className="font-serif text-4xl tracking-tight text-[#12362c] sm:text-5xl">
+                            Turmalina Café
+                        </h1>
+                        <p className="mt-2 text-sm text-slate-600">
+                            Painel de decisão semanal · últimos 28 dias versus
+                            período anterior
+                        </p>
+                    </div>
+                    <button
+                        className="rounded-full bg-[#0c5d4d] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#084b3d] disabled:opacity-60"
+                        onClick={() => void loadDashboard()}
+                        disabled={loading}
+                    >
+                        Atualizar dados
+                    </button>
+                </header>
+                <nav
+                    className="mb-7 flex gap-2 overflow-x-auto pb-2"
+                    aria-label="Seções do painel"
+                    role="tablist"
+                >
+                    {tabs.map(([id, label]) => (
+                        <button
+                            key={id}
+                            role="tab"
+                            aria-selected={tab === id}
+                            aria-controls={`${id}-panel`}
+                            className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold ${tab === id ? "bg-[#173c30] text-white" : "bg-white text-[#436457] shadow-sm hover:bg-[#dce9e1]"}`}
+                            onClick={() => setTab(id)}
+                        >
+                            {label}
+                        </button>
+                    ))}
+                </nav>
+                <div aria-live="polite" aria-atomic="true" className="sr-only">
+                    {loading
+                        ? "Carregando dados da operação"
+                        : error
+                          ? `Erro: ${error}`
+                          : "Dados da operação atualizados"}
                 </div>
-                <span className="hidden text-sm text-slate-500 sm:block">Ordenado por escore e menor venda/dia</span>
-              </div>
-              <div className="grid gap-4 lg:grid-cols-2">
-                {priorities.map((store, index) => <PriorityCard key={store.id_loja} store={store} position={index + 1} />)}
-              </div>
-            </section>
-
-            <section className="mt-8 grid gap-5 lg:grid-cols-[1.45fr_1fr]" id="operacao">
-              <div className="rounded-2xl bg-white p-6 shadow-[0_12px_40px_rgba(33,54,44,0.08)]">
-                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#5a7669]">Margem, equipe e desperdício</p>
-                <h2 className="mt-1 font-serif text-3xl text-[#173c30]">Saúde operacional da rede</h2>
-                <div className="mt-6 grid gap-3 sm:grid-cols-3">
-                  <MetricCard label="Ticket médio" value={averageTicket === null ? "—" : money.format(averageTicket)} note="Venda líquida por ticket" />
-                  <MetricCard label="Vendas por hora" value={averageProductivity === null ? "—" : money.format(averageProductivity)} note="Hora trabalhada de equipe" />
-                  <MetricCard label="Desperdício" value={averageWaste === null ? "—" : `${number.format(averageWaste)}%`} note="Média simples sobre vendas" tone="warm" />
-                </div>
-                <p className="mt-5 border-t border-slate-100 pt-4 text-xs leading-relaxed text-slate-500">A margem exibida considera somente vendas líquidas e insumos. Ela não é lucro e não inclui mão de obra, aluguel ou custos fixos.</p>
-              </div>
-              <aside className="rounded-2xl bg-[#dce9e1] p-6 text-[#173c30]">
-                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#527265]">Leitura da semana</p>
-                <h3 className="mt-2 font-serif text-2xl">Onde investigar antes de agir</h3>
-                <ul className="mt-5 space-y-3 text-sm leading-relaxed">
-                  <li className="border-l-2 border-[#0c5d4d] pl-3">Use vendas/dia para separar queda comercial de efeito de dias sem abertura.</li>
-                  <li className="border-l-2 border-[#0c5d4d] pl-3">Leia desperdício e margem juntos antes de mexer em preço ou mix.</li>
-                  <li className="border-l-2 border-[#0c5d4d] pl-3">Vendas/hora aponta onde revisar escala, não custo de mão de obra.</li>
-                </ul>
-              </aside>
-            </section>
-
-            <section className="mt-8 grid gap-5 lg:grid-cols-2" id="cliente">
-              <article className="rounded-2xl bg-[#fffaf0] p-6 shadow-sm ring-1 ring-[#ead8b8]">
-                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#8a5a25]">Experiência do cliente</p>
-                <h2 className="mt-1 font-serif text-3xl text-[#573a1a]">O que a clientela está sinalizando</h2>
-                <div className="mt-6 grid grid-cols-2 gap-3">
-                  <MetricCard label="Nota média" value={averageRating === null ? "—" : `${number.format(averageRating)} / 5`} note={`${ratedStores.length} lojas com amostra válida`} />
-                  <MetricCard label="Espera mediana" value={averageWait === null ? "—" : `${number.format(averageWait)} min`} note="Somente esperas válidas" />
-                </div>
-                <p className="mt-5 text-xs leading-relaxed text-[#765a38]">A experiência só entra no escore com ao menos 10 avaliações válidas nos últimos 90 dias. Notas e espera são sinais de investigação, não uma medida de toda a clientela.</p>
-              </article>
-              <article className="rounded-2xl bg-white p-6 shadow-sm">
-                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#5a7669]">Qualidade da evidência</p>
-                <h2 className="mt-1 font-serif text-3xl text-[#173c30]">Limites que aparecem na decisão</h2>
-                <div className="mt-5 divide-y divide-slate-100 text-sm">
-                  <EvidenceRow label="Lojas sem amostra suficiente de cliente" value={`${lowSampleStores.length} de ${stores.length}`} />
-                  <EvidenceRow label="Dias sem abertura registrados" value={`${closedDays} dias`} />
-                  <EvidenceRow label="Custo por produto" value="Não usado para ranking" />
-                </div>
-              </article>
-            </section>
-
-            <section className="mt-8 rounded-2xl bg-[#16362c] p-6 text-white shadow-[0_12px_40px_rgba(22,54,44,0.15)]" id="expansao">
-              <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] lg:items-center">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#cdbb98]">Expansão e prontidão</p>
-                  <h2 className="mt-2 font-serif text-3xl">Sinais para discutir antes de abrir</h2>
-                  <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d8e6dd]">{recentStores.length} lojas têm menos de 10 meses de operação. Esta página não recomenda expandir ou desacelerar: os dados não contêm investimento, custos fixos, capacidade de gestão, demanda local ou canibalização.</p>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <DarkMetric value={`${recentStores.length}`} label="Lojas recentes" />
-                  <DarkMetric value={`${stores.filter((store) => store.indicator.intervention_score > 0).length}`} label="Lojas com sinal" />
-                  <DarkMetric value={`${number.format(averageMargin)}%`} label="Margem após insumos" />
-                  <DarkMetric value={`${closedDays}`} label="Dias sem abertura" />
-                </div>
-              </div>
-            </section>
-
-            <section className="mt-8 rounded-2xl bg-white shadow-[0_12px_40px_rgba(33,54,44,0.08)]" id="lojas">
-              <div className="flex flex-col gap-2 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#5a7669]">Rede completa</p>
-                  <h2 className="mt-1 font-serif text-2xl text-[#173c30]">Sinais por loja</h2>
-                </div>
-                <p className="text-xs text-slate-500">Verde indica melhora; vermelho, piora.</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[1100px] text-left text-sm">
-                  <thead className="bg-[#f8f7f3] text-xs uppercase tracking-wide text-slate-500">
-                    <tr>
-                      <th className="px-5 py-3 font-semibold">Loja</th>
-                      <th className="px-3 py-3 font-semibold">Escore</th>
-                      <th className="px-3 py-3 font-semibold">Vendas/dia</th>
-                      <th className="px-3 py-3 font-semibold">Variação</th>
-                      <th className="px-3 py-3 font-semibold">Margem</th>
-                      <th className="px-3 py-3 font-semibold">Desperdício</th>
-                      <th className="px-3 py-3 font-semibold">Vendas/hora</th>
-                      <th className="px-3 py-3 font-semibold">Ticket</th>
-                      <th className="px-3 py-3 font-semibold">Cliente</th>
-                      <th className="px-5 py-3 font-semibold">Fechada</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {stores.map((store) => <StoreRow key={store.id_loja} store={store} />)}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </>
-        )}
-      </div>
-    </main>
-  );
+                {loading && (
+                    <div
+                        role="status"
+                        className="rounded-2xl bg-white p-10 text-center text-slate-500 shadow-sm"
+                    >
+                        Lendo os dados da operação...
+                    </div>
+                )}
+                {error && (
+                    <section
+                        role="alert"
+                        className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-950"
+                    >
+                        <p className="font-semibold">
+                            Não foi possível carregar o painel
+                        </p>
+                        <p className="mt-1 text-sm text-rose-800">
+                            {error} Confirme se a API está em execução em `
+                            {API_URL}`.
+                        </p>
+                    </section>
+                )}
+                {!loading && !error && (
+                    <>
+                        {tab === "overview" && (
+                            <section id="overview-panel" role="tabpanel">
+                                <div className="grid gap-4 md:grid-cols-3">
+                                    <Card
+                                        label="Vendas líquidas/dia"
+                                        value={money.format(salesPerDay)}
+                                        note={`${stores.length} lojas ativas`}
+                                    />
+                                    <Card
+                                        label="Margem após insumos"
+                                        value={
+                                            margin === null
+                                                ? "—"
+                                                : `${number.format(margin)}%`
+                                        }
+                                        note="Média simples da rede"
+                                    />
+                                    <Card
+                                        label="Dias sem abertura"
+                                        value={String(closedDays)}
+                                        note="No período analisado"
+                                    />
+                                </div>
+                                <section className="mt-8">
+                                    <Heading
+                                        eyebrow="Capacidade de intervenção"
+                                        title="Lojas para olhar agora"
+                                        note="Até duas, apenas quando há sinal material."
+                                    />
+                                    <div className="grid gap-4 lg:grid-cols-2">
+                                        {priorities.map((store, index) => (
+                                            <PriorityCard
+                                                key={store.id_loja}
+                                                store={store}
+                                                position={index + 1}
+                                            />
+                                        ))}
+                                        {priorities.length === 0 && (
+                                            <Empty text="Nenhuma loja atingiu escore positivo nesta janela." />
+                                        )}
+                                    </div>
+                                </section>
+                                <section className="mt-8 grid gap-5 lg:grid-cols-2">
+                                    <Quality
+                                        stores={stores.length}
+                                        lowSample={lowSample}
+                                        closedDays={closedDays}
+                                        quality={quality}
+                                    />
+                                    <article className="rounded-2xl bg-[#dce9e1] p-6">
+                                        <Heading
+                                            eyebrow="Leitura da semana"
+                                            title="Antes de agir"
+                                        />
+                                        <p className="mt-4 text-sm leading-relaxed text-[#35564a]">
+                                            O escore aponta investigação, não
+                                            causa. Leia dias fechados, vendas,
+                                            margem e desperdício juntos antes de
+                                            alterar preço, escala ou mix.
+                                        </p>
+                                    </article>
+                                </section>
+                            </section>
+                        )}
+                        {tab === "stores" && (
+                            <section id="stores-panel" role="tabpanel">
+                                <Heading
+                                    eyebrow="Rede completa"
+                                    title="Comparar, filtrar e investigar"
+                                />
+                                <div className="mt-5 flex flex-wrap gap-3 rounded-2xl bg-white p-4 shadow-sm">
+                                    <Filter
+                                        label="Formato"
+                                        value={format}
+                                        onChange={setFormat}
+                                        options={[
+                                            ...new Set(
+                                                stores.map(
+                                                    (store) => store.formato,
+                                                ),
+                                            ),
+                                        ]}
+                                    />
+                                    <Filter
+                                        label="Modelo"
+                                        value={model}
+                                        onChange={setModel}
+                                        options={[
+                                            ...new Set(
+                                                stores.map(
+                                                    (store) => store.modelo,
+                                                ),
+                                            ),
+                                        ]}
+                                    />
+                                </div>
+                                <div className="mt-5 grid gap-5 xl:grid-cols-[1.5fr_1fr]">
+                                    <StoreMatrix
+                                        stores={filtered}
+                                        selectedId={selected?.id_loja}
+                                        onSelect={setSelectedId}
+                                    />
+                                    <StoreDetail
+                                        store={selected}
+                                        sales={salesSeries}
+                                    />
+                                </div>
+                                <StoreTable stores={filtered} />
+                            </section>
+                        )}
+                        {tab === "margin" && (
+                            <section id="margin-panel" role="tabpanel">
+                                <Heading
+                                    eyebrow="Rentabilidade operacional"
+                                    title="Margem e desperdício"
+                                    note="Margem após insumos não é lucro: não inclui mão de obra, aluguel, impostos ou custos fixos."
+                                />
+                                <div className="mt-5 grid gap-4 md:grid-cols-3">
+                                    <Card
+                                        label="Margem média"
+                                        value={
+                                            margin === null
+                                                ? "—"
+                                                : `${number.format(margin)}%`
+                                        }
+                                        note="Após insumos"
+                                    />
+                                    <Card
+                                        label="Desperdício médio"
+                                        value={
+                                            waste === null
+                                                ? "—"
+                                                : `${number.format(waste)}%`
+                                        }
+                                        note="Sobre vendas líquidas"
+                                    />
+                                    <Card
+                                        label="Dias sem abertura"
+                                        value={String(closedDays)}
+                                        note="Vendas zero na janela"
+                                    />
+                                </div>
+                                <StoreTable stores={stores} columns="margin" />
+                            </section>
+                        )}
+                        {tab === "team" && (
+                            <section id="team-panel" role="tabpanel">
+                                <Heading
+                                    eyebrow="Capacidade e experiência"
+                                    title="Equipe e cliente"
+                                />
+                                <div className="mt-5 grid gap-4 md:grid-cols-3">
+                                    <Card
+                                        label="Vendas por hora"
+                                        value={
+                                            productivity === null
+                                                ? "—"
+                                                : `${money.format(productivity)}/h`
+                                        }
+                                        note="Média simples"
+                                    />
+                                    <Card
+                                        label="Nota média"
+                                        value={
+                                            rating === null
+                                                ? "—"
+                                                : `${number.format(rating)} / 5`
+                                        }
+                                        note={`${stores.length - lowSample} lojas com amostra válida`}
+                                    />
+                                    <Card
+                                        label="Amostra insuficiente"
+                                        value={`${lowSample} lojas`}
+                                        note="Menos de 10 avaliações válidas"
+                                    />
+                                </div>
+                                <StoreTable stores={stores} columns="team" />
+                            </section>
+                        )}
+                        {tab === "expansion" && (
+                            <section id="expansion-panel" role="tabpanel">
+                                <Heading
+                                    eyebrow="Prontidão, não recomendação"
+                                    title="Expansão e qualidade dos dados"
+                                    note="Os dados não permitem recomendar expandir ou desacelerar sem investimento, custos fixos, demanda local, canibalização e capacidade de gestão."
+                                />
+                                <div className="mt-5 grid gap-5 lg:grid-cols-2">
+                                    <article className="rounded-2xl bg-[#16362c] p-6 text-white">
+                                        <h3 className="font-serif text-2xl">
+                                            Checklist visível
+                                        </h3>
+                                        <ul className="mt-5 space-y-3 text-sm text-[#d8e6dd]">
+                                            <li>
+                                                {recent} lojas recentes:
+                                                comparar com cautela.
+                                            </li>
+                                            <li>
+                                                {closedDays} dias sem abertura:
+                                                ausência de venda foi tratada
+                                                como zero.
+                                            </li>
+                                            <li>
+                                                Margem considera somente
+                                                insumos, não lucro.
+                                            </li>
+                                            <li>
+                                                Não há dados de investimento,
+                                                mercado ou canibalização.
+                                            </li>
+                                        </ul>
+                                    </article>
+                                    <Quality
+                                        stores={stores.length}
+                                        lowSample={lowSample}
+                                        closedDays={closedDays}
+                                        quality={quality}
+                                    />
+                                </div>
+                            </section>
+                        )}
+                    </>
+                )}
+            </div>
+        </main>
+    );
 }
 
-function SummaryCard({ label, value, note, highlight = false }: { label: string; value: string; note: string; highlight?: boolean }) {
-  return <article className="rounded-2xl bg-white p-5 shadow-sm"><p className="text-sm text-slate-500">{label}</p><p className={`mt-3 text-3xl font-semibold tracking-tight ${highlight ? "text-[#a34b27]" : "text-[#173c30]"}`}>{value}</p><p className="mt-2 text-xs text-slate-500">{note}</p></article>;
-}
-
-function MetricCard({ label, value, note, tone = "plain" }: { label: string; value: string; note: string; tone?: "plain" | "warm" }) {
-  return <div className={`rounded-xl p-4 ${tone === "warm" ? "bg-[#fff6e4] text-[#714416]" : "bg-[#f5f8f5] text-[#173c30]"}`}><p className="text-xs font-medium opacity-70">{label}</p><p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-[11px] leading-tight opacity-70">{note}</p></div>;
-}
-
-function EvidenceRow({ label, value }: { label: string; value: string }) {
-  return <div className="flex items-center justify-between gap-4 py-3"><p className="text-slate-600">{label}</p><p className="text-right text-xs font-bold text-[#173c30]">{value}</p></div>;
-}
-
-function DarkMetric({ value, label }: { value: string; label: string }) {
-  return <div className="rounded-xl bg-white/10 p-3"><p className="text-xl font-semibold text-[#f7e7c7]">{value}</p><p className="mt-1 text-[11px] leading-tight text-[#c9d8ce]">{label}</p></div>;
-}
-
-function PriorityCard({ store, position }: { store: DashboardStore; position: number }) {
-  const { indicator } = store;
-  return (
-    <article className="overflow-hidden rounded-2xl border border-[#d8c9af] bg-[#193c31] text-white shadow-[0_14px_30px_rgba(25,60,49,0.18)]">
-      <div className="flex items-start justify-between p-6 pb-4">
+function Heading({
+    eyebrow,
+    title,
+    note,
+}: {
+    eyebrow: string;
+    title: string;
+    note?: string;
+}) {
+    return (
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#cdbb98]">Prioridade {position}</p>
-          <h3 className="mt-2 font-serif text-3xl leading-none">{store.nome_loja.replace("Turmalina ", "")}</h3>
-          <p className="mt-2 text-sm text-[#d9e4dd]">{store.cidade_uf} · {store.formato}</p>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#5a7669]">
+                {eyebrow}
+            </p>
+            <h2 className="mt-1 font-serif text-3xl text-[#173c30]">{title}</h2>
+            {note && (
+                <p className="mt-2 max-w-3xl text-sm text-slate-600">{note}</p>
+            )}
         </div>
-        <div className="rounded-full bg-[#e8b65f] px-3 py-2 text-center text-[#193c31]"><strong className="block text-xl leading-none">{indicator.intervention_score}</strong><span className="text-[10px] font-bold uppercase">de 5</span></div>
-      </div>
-      <div className="grid grid-cols-3 border-y border-white/15 bg-black/10 px-6 py-4 text-sm">
-        <div><p className="text-xs text-[#b8cbbf]">Vendas/dia</p><p className="mt-1 font-semibold">{money.format(value(indicator.net_sales_per_calendar_day) ?? 0)}</p></div>
-        <div><p className="text-xs text-[#b8cbbf]">Variação</p><p className={`mt-1 font-semibold ${metricClass(indicator.net_sales_per_calendar_day_change_pct)}`}>{signedPercent(indicator.net_sales_per_calendar_day_change_pct)}</p></div>
-        <div><p className="text-xs text-[#b8cbbf]">Margem</p><p className="mt-1 font-semibold">{number.format(value(indicator.ingredient_margin_pct) ?? 0)}%</p></div>
-      </div>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-3 px-6 py-4 text-sm sm:grid-cols-4">
-        <PriorityMetric label="Produtividade" value={indicator.net_sales_per_team_hour ? `${money.format(value(indicator.net_sales_per_team_hour) ?? 0)}/h` : "—"} />
-        <PriorityMetric label="Desperdício" value={indicator.waste_pct_of_net_sales ? `${number.format(value(indicator.waste_pct_of_net_sales) ?? 0)}%` : "—"} />
-        <PriorityMetric label="Ticket médio" value={indicator.average_net_ticket ? money.format(value(indicator.average_net_ticket) ?? 0) : "—"} />
-        <PriorityMetric label="Cliente" value={indicator.average_rating ? `${number.format(value(indicator.average_rating) ?? 0)} / 5` : "Amostra insuf."} />
-      </div>
-      <div className="p-6 pt-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-[#cdbb98]">Mais vendidos · mês mais recente</p><div className="mt-3 flex flex-wrap gap-2">{indicator.top_selling_products.slice(0, 3).map((product) => <span className="rounded-full bg-white/10 px-3 py-1.5 text-xs text-[#edf4ef]" key={product.name}>{product.name} <b className="ml-1 text-[#cdbb98]">{number.format(product.quantity_sold)}</b></span>)}</div></div>
-    </article>
-  );
+    );
+}
+function Card({
+    label,
+    value,
+    note,
+}: {
+    label: string;
+    value: string;
+    note: string;
+}) {
+    return (
+        <article className="rounded-2xl bg-white p-5 shadow-sm">
+            <p className="text-sm text-slate-500">{label}</p>
+            <p className="mt-3 text-3xl font-semibold tracking-tight text-[#173c30]">
+                {value}
+            </p>
+            <p className="mt-2 text-xs text-slate-500">{note}</p>
+        </article>
+    );
+}
+function Empty({ text }: { text: string }) {
+    return (
+        <p className="rounded-2xl border border-dashed border-[#b9c9bf] bg-white/60 p-6 text-sm text-[#436457]">
+            {text}
+        </p>
+    );
+}
+function Filter({
+    label,
+    value,
+    onChange,
+    options,
+}: {
+    label: string;
+    value: string;
+    onChange: (value: string) => void;
+    options: string[];
+}) {
+    return (
+        <label className="text-sm font-medium text-[#35564a]">
+            {label}
+            <select
+                className="ml-2 rounded-lg border border-[#cbd8d0] bg-white px-3 py-2 text-[#173c30]"
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+            >
+                <option value="all">Todos</option>
+                {options.map((option) => (
+                    <option key={option}>{option}</option>
+                ))}
+            </select>
+        </label>
+    );
+}
+function Quality({
+    stores,
+    lowSample,
+    closedDays,
+    quality,
+}: {
+    stores: number;
+    lowSample: number;
+    closedDays: number;
+    quality: DataQuality | null;
+}) {
+    return (
+        <article className="rounded-2xl bg-white p-6 shadow-sm">
+            <Heading
+                eyebrow="Qualidade da evidência"
+                title="Limites que entram na decisão"
+            />
+            <dl className="mt-5 divide-y divide-slate-100 text-sm">
+                <Data
+                    label="Cliente com amostra insuficiente"
+                    value={`${lowSample} de ${stores} lojas`}
+                />
+                <Data
+                    label="Dias sem abertura registrados"
+                    value={`${closedDays} dias`}
+                />
+                <Data
+                    label="Duplicatas de venda retidas"
+                    value={
+                        quality
+                            ? `${quality.duplicate_daily_sales} linha(s)`
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Esperas implausíveis excluídas"
+                    value={
+                        quality
+                            ? `${quality.implausible_wait_times} registros`
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Notas inválidas excluídas"
+                    value={
+                        quality ? `${quality.invalid_ratings} registros` : "—"
+                    }
+                />
+                <Data
+                    label="Custos unitários ausentes"
+                    value={
+                        quality ? `${quality.missing_unit_costs} linhas` : "—"
+                    }
+                />
+            </dl>
+        </article>
+    );
+}
+function Data({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="flex justify-between gap-4 py-3">
+            <dt className="text-slate-600">{label}</dt>
+            <dd className="text-right text-xs font-bold text-[#173c30]">
+                {value}
+            </dd>
+        </div>
+    );
+}
+function PriorityCard({
+    store,
+    position,
+}: {
+    store: DashboardStore;
+    position: number;
+}) {
+    const { indicator } = store;
+    return (
+        <article className="overflow-hidden rounded-2xl border border-[#d8c9af] bg-[#193c31] text-white shadow-[0_14px_30px_rgba(25,60,49,0.18)]">
+            <div className="flex justify-between p-6">
+                <div>
+                    <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#cdbb98]">
+                        Prioridade {position}
+                    </p>
+                    <h3 className="mt-2 font-serif text-3xl">
+                        {store.nome_loja.replace("Turmalina ", "")}
+                    </h3>
+                    <p className="mt-1 text-sm text-[#d9e4dd]">
+                        {store.cidade_uf} · {store.formato}
+                    </p>
+                </div>
+                <div className="h-fit rounded-full bg-[#e8b65f] px-3 py-2 text-center text-[#193c31]">
+                    <b className="block text-xl">
+                        {indicator.intervention_score}
+                    </b>
+                    <span className="text-[10px] font-bold uppercase">
+                        de 5
+                    </span>
+                </div>
+            </div>
+            <div className="border-y border-white/15 bg-black/10 px-6 py-4">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#cdbb98]">
+                    Por que cada ponto
+                </p>
+                <ul className="mt-2 flex flex-wrap gap-2">
+                    {reasons(indicator).map((reason, index) => (
+                        <li
+                            key={`${index}-${reason}`}
+                            className="rounded-full bg-white/10 px-3 py-1 text-xs"
+                        >
+                            {index + 1}. {reason}
+                        </li>
+                    ))}
+                </ul>
+            </div>
+            <div className="p-6">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#cdbb98]">
+                    Cinco mais vendidos · mês mais recente
+                </p>
+                <ol className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {indicator.top_selling_products
+                        .slice(0, 5)
+                        .map((product) => (
+                            <li
+                                className="flex justify-between rounded-lg bg-white/10 px-3 py-2 text-xs"
+                                key={product.name}
+                            >
+                                <span>{product.name}</span>
+                                <b className="text-[#cdbb98]">
+                                    {number.format(product.quantity_sold)}
+                                </b>
+                            </li>
+                        ))}
+                </ol>
+            </div>
+        </article>
+    );
+}
+function StoreMatrix({
+    stores,
+    selectedId,
+    onSelect,
+}: {
+    stores: DashboardStore[];
+    selectedId?: string;
+    onSelect: (id: string) => void;
+}) {
+    return (
+        <article className="rounded-2xl bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-[#173c30]">
+                Matriz: vendas/dia × variação
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+                Selecione uma loja para ver o detalhe. A cor marca o escore.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {stores.map((store) => (
+                    <button
+                        key={store.id_loja}
+                        onClick={() => onSelect(store.id_loja)}
+                        className={`rounded-xl border p-3 text-left transition ${selectedId === store.id_loja ? "border-[#0c5d4d] bg-[#dce9e1]" : "border-slate-100 hover:border-[#8aaf9e]"}`}
+                    >
+                        <span className="flex justify-between text-xs text-slate-500">
+                            <span>{store.formato}</span>
+                            <b>{store.indicator.intervention_score}/5</b>
+                        </span>
+                        <strong className="mt-3 block text-sm text-[#173c30]">
+                            {store.nome_loja.replace("Turmalina ", "")}
+                        </strong>
+                        <span
+                            className={`mt-1 block text-xs ${metricClass(store.indicator.net_sales_per_calendar_day_change_pct)}`}
+                        >
+                            {percent(
+                                store.indicator
+                                    .net_sales_per_calendar_day_change_pct,
+                            )}
+                        </span>
+                    </button>
+                ))}
+            </div>
+        </article>
+    );
+}
+function StoreDetail({
+    store,
+    sales,
+}: {
+    store?: DashboardStore;
+    sales: DailySalesPoint[];
+}) {
+    if (!store)
+        return <Empty text="Nenhuma loja atende aos filtros selecionados." />;
+    const i = store.indicator;
+    return (
+        <article className="rounded-2xl bg-[#fffaf0] p-6 ring-1 ring-[#ead8b8]">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#8a5a25]">
+                Loja selecionada
+            </p>
+            <h3 className="mt-1 font-serif text-2xl text-[#573a1a]">
+                {store.nome_loja}
+            </h3>
+            <p className="text-sm text-[#765a38]">
+                {store.cidade_uf} · {store.formato} · {store.modelo}
+            </p>
+            <dl className="mt-5 grid grid-cols-2 gap-3">
+                <Data
+                    label="Vendas/dia"
+                    value={money.format(
+                        value(i.net_sales_per_calendar_day) ?? 0,
+                    )}
+                />
+                <Data
+                    label="Margem"
+                    value={`${number.format(value(i.ingredient_margin_pct) ?? 0)}%`}
+                />
+                <Data
+                    label="Desperdício"
+                    value={
+                        i.waste_pct_of_net_sales
+                            ? `${number.format(value(i.waste_pct_of_net_sales) ?? 0)}%`
+                            : "—"
+                    }
+                />
+                <Data
+                    label="Fechada"
+                    value={`${i.days_without_opening} dias`}
+                />
+            </dl>
+            <p className="mt-4 text-xs font-semibold text-[#765a38]">
+                Sinais: {reasons(i).join(" · ") || "Sem sinal material"}
+            </p>
+            <DailySalesStrip points={sales} />
+        </article>
+    );
 }
 
-function PriorityMetric({ label, value }: { label: string; value: string }) {
-  return <div><p className="text-[11px] text-[#b8cbbf]">{label}</p><p className="mt-0.5 font-semibold text-sm">{value}</p></div>;
+function DailySalesStrip({ points }: { points: DailySalesPoint[] }) {
+    const recent = points.slice(-28);
+    const highest = Math.max(
+        ...recent.map((point) => value(point.net_sales) ?? 0),
+        1,
+    );
+    return (
+        <div className="mt-5 border-t border-[#ead8b8] pt-4">
+            <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#8a5a25]">
+                Série diária de vendas líquidas · 28 dias
+            </p>
+            <div
+                className="mt-3 flex h-20 items-end gap-1"
+                aria-label="Série diária de vendas líquidas"
+            >
+                {recent.map((point) => {
+                    const netSales = value(point.net_sales) ?? 0;
+                    return (
+                        <div
+                            className="group relative h-full min-w-0 flex-1"
+                            key={point.date}
+                        >
+                            <div
+                                className="w-full rounded-t bg-[#b47a37] transition group-hover:bg-[#80501d]"
+                                style={{
+                                    height: `${Math.max((netSales / highest) * 100, 2)}%`,
+                                }}
+                            />
+                            <span className="sr-only">
+                                {point.date}: {money.format(netSales)}
+                            </span>
+                        </div>
+                    );
+                })}
+            </div>
+            <p className="mt-2 text-[11px] text-[#765a38]">
+                Cada barra representa um dia; ausência de venda aparece como
+                barra mínima.
+            </p>
+        </div>
+    );
 }
-
-function StoreRow({ store }: { store: DashboardStore }) {
-  const { indicator } = store;
-  const customer = indicator.average_rating ? `${number.format(value(indicator.average_rating) ?? 0)} / 5` : "Amostra insuficiente";
-  return <tr className="transition hover:bg-[#faf9f5]"><td className="px-5 py-4"><p className="font-semibold text-[#173c30]">{store.nome_loja}</p><p className="mt-0.5 text-xs text-slate-500">{store.cidade_uf}</p></td><td className="px-3 py-4"><span className={`inline-flex h-7 min-w-7 items-center justify-center rounded-full px-2 font-bold ${indicator.intervention_score ? "bg-[#fae5b8] text-[#845016]" : "bg-slate-100 text-slate-500"}`}>{indicator.intervention_score}</span></td><td className="px-3 py-4 font-medium">{money.format(value(indicator.net_sales_per_calendar_day) ?? 0)}</td><td className={`px-3 py-4 font-medium ${metricClass(indicator.net_sales_per_calendar_day_change_pct)}`}>{signedPercent(indicator.net_sales_per_calendar_day_change_pct)}</td><td className="px-3 py-4">{number.format(value(indicator.ingredient_margin_pct) ?? 0)}%</td><td className="px-3 py-4">{indicator.waste_pct_of_net_sales ? `${number.format(value(indicator.waste_pct_of_net_sales) ?? 0)}%` : "—"}</td><td className="px-3 py-4">{indicator.net_sales_per_team_hour ? `${money.format(value(indicator.net_sales_per_team_hour) ?? 0)}/h` : "—"}</td><td className="px-3 py-4">{indicator.average_net_ticket ? money.format(value(indicator.average_net_ticket) ?? 0) : "—"}</td><td className="px-3 py-4 text-slate-600">{customer}</td><td className="px-5 py-4">{indicator.days_without_opening ? <span className="font-semibold text-[#a34b27]">{indicator.days_without_opening} dia(s)</span> : <span className="text-slate-400">—</span>}</td></tr>;
+function StoreTable({
+    stores,
+    columns = "all",
+}: {
+    stores: DashboardStore[];
+    columns?: "all" | "margin" | "team";
+}) {
+    const showMargin = columns !== "team";
+    const showTeam = columns !== "margin";
+    return (
+        <section className="mt-5 rounded-2xl bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-4">
+                <h3 className="font-serif text-2xl text-[#173c30]">
+                    Comparação por loja
+                </h3>
+                <p className="text-xs text-slate-500">
+                    Use a rolagem horizontal para acessar todas as métricas.
+                </p>
+            </div>
+            <div
+                className="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#0c5d4d]"
+                tabIndex={0}
+                role="region"
+                aria-label="Tabela comparativa de lojas"
+            >
+                <table className="w-full min-w-[760px] text-left text-sm">
+                    <thead className="bg-[#f8f7f3] text-xs uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th className="px-5 py-3">Loja</th>
+                            <th className="px-3 py-3">Escore</th>
+                            <th className="px-3 py-3">Vendas/dia</th>
+                            <th className="px-3 py-3">Variação</th>
+                            {showMargin && (
+                                <>
+                                    <th className="px-3 py-3">Margem</th>
+                                    <th className="px-3 py-3">Desperdício</th>
+                                </>
+                            )}
+                            {showTeam && (
+                                <>
+                                    <th className="px-3 py-3">Vendas/hora</th>
+                                    <th className="px-3 py-3">Cliente</th>
+                                </>
+                            )}
+                            <th className="px-5 py-3">Fechada</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {stores.map((store) => {
+                            const i = store.indicator;
+                            return (
+                                <tr
+                                    key={store.id_loja}
+                                    className="hover:bg-[#faf9f5]"
+                                >
+                                    <td className="px-5 py-4">
+                                        <b className="text-[#173c30]">
+                                            {store.nome_loja}
+                                        </b>
+                                        <span className="block text-xs text-slate-500">
+                                            {store.cidade_uf}
+                                        </span>
+                                    </td>
+                                    <td className="px-3 py-4 font-bold">
+                                        {i.intervention_score}
+                                    </td>
+                                    <td className="px-3 py-4">
+                                        {money.format(
+                                            value(
+                                                i.net_sales_per_calendar_day,
+                                            ) ?? 0,
+                                        )}
+                                    </td>
+                                    <td
+                                        className={`px-3 py-4 font-medium ${metricClass(i.net_sales_per_calendar_day_change_pct)}`}
+                                    >
+                                        {percent(
+                                            i.net_sales_per_calendar_day_change_pct,
+                                        )}
+                                    </td>
+                                    {showMargin && (
+                                        <>
+                                            <td className="px-3 py-4">
+                                                {number.format(
+                                                    value(
+                                                        i.ingredient_margin_pct,
+                                                    ) ?? 0,
+                                                )}
+                                                %
+                                            </td>
+                                            <td className="px-3 py-4">
+                                                {i.waste_pct_of_net_sales
+                                                    ? `${number.format(value(i.waste_pct_of_net_sales) ?? 0)}%`
+                                                    : "—"}
+                                            </td>
+                                        </>
+                                    )}
+                                    {showTeam && (
+                                        <>
+                                            <td className="px-3 py-4">
+                                                {i.net_sales_per_team_hour
+                                                    ? `${money.format(value(i.net_sales_per_team_hour) ?? 0)}/h`
+                                                    : "—"}
+                                            </td>
+                                            <td className="px-3 py-4">
+                                                {i.average_rating
+                                                    ? `${number.format(value(i.average_rating) ?? 0)}/5`
+                                                    : "Amostra insuf."}
+                                            </td>
+                                        </>
+                                    )}
+                                    <td className="px-5 py-4">
+                                        {i.days_without_opening || "—"}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
 }

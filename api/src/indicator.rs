@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use chrono::{Duration, NaiveDate};
+use chrono::{Duration, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -16,6 +16,7 @@ const MAXIMUM_VALID_WAIT_MINUTES: u16 = 120;
 pub struct StoreIndicators {
     pub store_id: String,
     pub intervention_score: u8,
+    pub score_reasons: Vec<String>,
     pub days_without_opening: u32,
     pub net_sales_per_calendar_day: Decimal,
     pub net_sales_per_calendar_day_change_pct: Decimal,
@@ -50,6 +51,7 @@ struct SalesTotals {
 impl StoreIndicators {
     pub fn from_general_data(
         store: &Store,
+        stores: &[Store],
         daily_sales: &[DailySale],
         products: &[Product],
         ratings: &[Rating],
@@ -75,9 +77,12 @@ impl StoreIndicators {
         let previous_sales_per_hour = ratio(previous.net_sales, previous.team_worked_hours);
         let (valid_rating_count, average_rating, median_wait_time_minutes) =
             customer_indicators(ratings, &store.store_id, period_end);
-        let intervention_score = intervention_score(
+        let uses_peer_references = eligible_store_ids(stores, period_end).contains(&store.store_id);
+        let score_reasons = intervention_score_reasons(
+            stores,
             daily_sales,
             ratings,
+            uses_peer_references,
             current_start,
             period_end,
             current_sales_per_day,
@@ -94,7 +99,8 @@ impl StoreIndicators {
 
         Ok(Self {
             store_id: store.store_id.clone(),
-            intervention_score,
+            intervention_score: score_reasons.len() as u8,
+            score_reasons,
             days_without_opening: days_without_opening(
                 daily_sales,
                 &store.store_id,
@@ -160,9 +166,11 @@ fn top_selling_products(products: &[Product], store_id: &str) -> Vec<TopSellingP
 }
 
 #[allow(clippy::too_many_arguments)]
-fn intervention_score(
+fn intervention_score_reasons(
+    stores: &[Store],
     daily_sales: &[DailySale],
     ratings: &[Rating],
+    uses_peer_references: bool,
     current_start: NaiveDate,
     period_end: NaiveDate,
     current_sales_per_day: Decimal,
@@ -175,30 +183,34 @@ fn intervention_score(
     current_net_sales: Decimal,
     average_rating: Option<Decimal>,
     median_wait_time_minutes: Option<u16>,
-) -> Result<u8> {
-    let mut score = 0;
+) -> Result<Vec<String>> {
+    let mut reasons = Vec::new();
 
     if percentage_change(current_sales_per_day, previous_sales_per_day)? < Decimal::from(-5) {
-        score += 1;
+        reasons.push("sales_per_day_decline".to_owned());
     }
     if current_margin - previous_margin < Decimal::from(-2) {
-        score += 1;
+        reasons.push("ingredient_margin_decline".to_owned());
     }
-    if let (Some(current), Some(previous)) = (current_sales_per_hour, previous_sales_per_hour) {
-        if percentage_change(current, previous)? < Decimal::from(-5) {
-            score += 1;
-        }
+    if let (Some(current), Some(previous)) = (current_sales_per_hour, previous_sales_per_hour)
+        && percentage_change(current, previous)? < Decimal::from(-5)
+    {
+        reasons.push("sales_per_team_hour_decline".to_owned());
     }
-    if let (Some(current_waste_pct), Some(waste_threshold)) = (
+    if uses_peer_references
+        && let (Some(current_waste_pct), Some(waste_threshold)) = (
         ratio(current_waste, current_net_sales),
-        network_waste_threshold(daily_sales, current_start, period_end),
-    ) {
-        if current_waste_pct >= waste_threshold {
-            score += 1;
-        }
+        network_waste_threshold(stores, daily_sales, current_start, period_end),
+    ) && current_waste_pct >= waste_threshold
+    {
+        reasons.push("high_waste_vs_network".to_owned());
     }
 
-    let (rating_threshold, wait_threshold) = network_customer_thresholds(ratings, period_end);
+    let (rating_threshold, wait_threshold) = if uses_peer_references {
+        network_customer_thresholds(stores, ratings, period_end)
+    } else {
+        (None, None)
+    };
     let poor_customer_experience = average_rating
         .zip(rating_threshold)
         .is_some_and(|(rating, threshold)| rating <= threshold)
@@ -206,21 +218,19 @@ fn intervention_score(
             .zip(wait_threshold)
             .is_some_and(|(wait, threshold)| wait >= threshold);
     if poor_customer_experience {
-        score += 1;
+        reasons.push("poor_customer_experience_vs_network".to_owned());
     }
 
-    Ok(score)
+    Ok(reasons)
 }
 
 fn network_waste_threshold(
+    stores: &[Store],
     daily_sales: &[DailySale],
     start: NaiveDate,
     end: NaiveDate,
 ) -> Option<Decimal> {
-    let store_ids: HashSet<String> = daily_sales
-        .iter()
-        .map(|sale| sale.id_loja.trim().to_ascii_uppercase())
-        .collect();
+    let store_ids = eligible_store_ids(stores, end);
     let mut waste_percentages = store_ids
         .iter()
         .filter_map(|store_id| {
@@ -233,13 +243,11 @@ fn network_waste_threshold(
 }
 
 fn network_customer_thresholds(
+    stores: &[Store],
     ratings: &[Rating],
     period_end: NaiveDate,
 ) -> (Option<Decimal>, Option<u16>) {
-    let store_ids: HashSet<String> = ratings
-        .iter()
-        .map(|rating| rating.store_id.trim().to_ascii_uppercase())
-        .collect();
+    let store_ids = eligible_store_ids(stores, period_end);
     let mut average_ratings = Vec::new();
     let mut median_wait_times = Vec::new();
 
@@ -258,6 +266,17 @@ fn network_customer_thresholds(
         percentile_decimal(&mut average_ratings, 1, 4),
         percentile_u16(&mut median_wait_times, 3, 4),
     )
+}
+
+fn eligible_store_ids(stores: &[Store], latest_data_date: NaiveDate) -> HashSet<String> {
+    let maturity_cutoff = latest_data_date
+        .checked_sub_months(Months::new(10))
+        .expect("ten-month maturity cutoff must be representable");
+    stores
+        .iter()
+        .filter(|store| store.status && store.opening_date <= maturity_cutoff)
+        .map(|store| store.store_id.clone())
+        .collect()
 }
 
 fn percentile_decimal(
@@ -351,7 +370,7 @@ fn customer_indicators(
     let median_wait_time_minutes =
         (wait_times.len() >= MINIMUM_VALID_RATINGS as usize).then(|| {
             let middle = wait_times.len() / 2;
-            if wait_times.len() % 2 == 0 {
+            if wait_times.len().is_multiple_of(2) {
                 (wait_times[middle - 1] + wait_times[middle]) / 2
             } else {
                 wait_times[middle]
@@ -446,7 +465,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let indicators = StoreIndicators::from_general_data(&store, &sales, &products, &ratings)?;
+        let indicators = StoreIndicators::from_general_data(
+            &store,
+            &[store.clone()],
+            &sales,
+            &products,
+            &ratings,
+        )?;
 
         assert_eq!(indicators.intervention_score, 2);
         assert_eq!(indicators.days_without_opening, 27);
@@ -464,6 +489,107 @@ mod tests {
             }]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_recent_stores_from_network_references() {
+        let mature = Store {
+            store_id: "LJ01".to_owned(),
+            name: "Madura".to_owned(),
+            district: "Belo Horizonte/MG".to_owned(),
+            format: "Rua".to_owned(),
+            model: "Própria".to_owned(),
+            opening_date: date(2025, 8, 30),
+            status: true,
+        };
+        let recent = Store {
+            store_id: "LJ02".to_owned(),
+            opening_date: date(2025, 9, 1),
+            ..mature.clone()
+        };
+        let inactive = Store {
+            store_id: "LJ03".to_owned(),
+            status: false,
+            ..mature.clone()
+        };
+
+        assert_eq!(
+            eligible_store_ids(&[mature, recent, inactive], date(2026, 6, 30)),
+            HashSet::from(["LJ01".to_owned()])
+        );
+    }
+
+    #[test]
+    fn recent_stores_do_not_receive_peer_relative_score_reasons() -> Result<()> {
+        let reasons = intervention_score_reasons(
+            &[],
+            &[],
+            &[],
+            false,
+            date(2026, 6, 3),
+            date(2026, 6, 30),
+            Decimal::from(100),
+            Decimal::from(100),
+            Decimal::from(70),
+            Decimal::from(70),
+            Some(Decimal::from(100)),
+            Some(Decimal::from(100)),
+            Decimal::from(10),
+            Decimal::from(100),
+            Some(Decimal::ONE),
+            Some(120),
+        )?;
+
+        assert!(reasons.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn exposes_each_triggered_score_reason() -> Result<()> {
+        let stores = vec![Store {
+            store_id: "LJ01".to_owned(),
+            name: "Teste".to_owned(),
+            district: "Belo Horizonte/MG".to_owned(),
+            format: "Rua".to_owned(),
+            model: "Própria".to_owned(),
+            opening_date: date(2020, 1, 1),
+            status: true,
+        }];
+        let mut sales = Vec::new();
+        for day in 0..56 {
+            let mut entry = sale(date(2026, 5, 6) + Duration::days(day));
+            if day >= 28 {
+                entry.gross_revenue = Decimal::from(50);
+            }
+            sales.push(entry);
+        }
+        let ratings = (0..10)
+            .map(|index| Rating {
+                rating_id: index.to_string(),
+                store_id: "LJ01".to_owned(),
+                date: date(2026, 6, 30),
+                score: Some(1),
+                channel: "app".to_owned(),
+                wait_time_minutes: Some(120),
+                comment: None,
+            })
+            .collect::<Vec<_>>();
+
+        let indicators =
+            StoreIndicators::from_general_data(&stores[0], &stores, &sales, &[], &ratings)?;
+
+        assert_eq!(indicators.intervention_score, 5);
+        assert_eq!(
+            indicators.score_reasons,
+            vec![
+                "sales_per_day_decline",
+                "ingredient_margin_decline",
+                "sales_per_team_hour_decline",
+                "high_waste_vs_network",
+                "poor_customer_experience_vs_network",
+            ]
+        );
         Ok(())
     }
 }

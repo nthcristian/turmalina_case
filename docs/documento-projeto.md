@@ -65,6 +65,11 @@ O painel contém cinco páginas:
 - Custo unitário ausente no arquivo de itens: não afeta os produtos mais vendidos por quantidade; impede qualquer conclusão de custo por produto.
 - Nota textual: converter somente formatos explicitamente reconhecidos, como `3 estrelas` e `quatro`; valores não interpretáveis ficam excluídos e contados.
 - Espera: valores acima de 120 minutos são tratados como falha de totem e excluídos, com contagem visível.
+- Vendas diárias: linhas com o mesmo `id_loja` normalizado e data são deduplicadas na carga, preservando a primeira ocorrência. A ausência de linha continua significando loja fechada e venda zero.
+
+### Contrato de qualidade
+
+`GET /api/data-quality` expõe `duplicate_daily_sales`, `invalid_ratings`, `implausible_wait_times` e `missing_unit_costs`. Cada indicador de loja também expõe `score_reasons`, com os sinais que compõem seu escore.
 
 ## 5. Dicionário de indicadores
 
@@ -90,8 +95,8 @@ Uma loja ativa nas duas janelas recebe um ponto por cada condição abaixo. O es
 | Venda | queda superior a 5% em vendas líquidas/dia-calendário | Limite fixo, escolhido para não sinalizar variação pequena como crise. |
 | Margem | queda superior a 2 pontos percentuais na margem após insumos | Limite fixo, separa alteração material de oscilação pequena. |
 | Equipe | queda superior a 5% em vendas líquidas/hora | Limite fixo, alinhado ao limite de venda. |
-| Desperdício | valor no pior quartil da rede elegível | Não há meta externa fornecida; compara posição relativa, não desempenho absoluto. |
-| Cliente | nota média ou espera mediana no pior quartil da rede com amostra válida | Não há padrão de serviço fornecido; só é sinal contextual. |
+| Desperdício | valor no pior quartil da rede elegível | Não há meta externa fornecida; compara posição relativa, não desempenho absoluto. Lojas abertas há menos de 10 meses ficam fora das referências. |
+| Cliente | nota média ou espera mediana no pior quartil da rede com amostra válida | Não há padrão de serviço fornecido; só é sinal contextual. Lojas abertas há menos de 10 meses ficam fora das referências. |
 
 O painel recomenda, no máximo, duas lojas com maior escore. Se não houver duas lojas com sinal material, ele informa que não há evidência suficiente para preencher artificialmente a capacidade de intervenção.
 

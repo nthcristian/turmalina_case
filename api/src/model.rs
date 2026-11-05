@@ -2,9 +2,9 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DailySale {
     #[serde(rename = "data", deserialize_with = "deserialize_date")]
     pub date: NaiveDate,
@@ -42,7 +42,7 @@ pub struct Store {
     pub status: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Product {
     #[serde(rename = "id_loja")]
     pub store_id: String,
@@ -58,7 +58,7 @@ pub struct Product {
     pub unit_cost: Option<Decimal>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Rating {
     #[serde(rename = "id_avaliacao")]
     pub rating_id: String,
@@ -74,6 +74,107 @@ pub struct Rating {
     pub wait_time_minutes: Option<u16>,
     #[serde(rename = "comentario")]
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DataQuality {
+    pub duplicate_daily_sales: u32,
+    pub invalid_ratings: u32,
+    pub implausible_wait_times: u32,
+    pub missing_unit_costs: u32,
+}
+
+pub fn normalize_loaded_data(
+    stores: &mut [Store],
+    daily_sales: &mut Vec<DailySale>,
+    products: &mut [Product],
+    ratings: &mut [Rating],
+) -> DataQuality {
+    for store in stores {
+        store.store_id = normalize_store_id(&store.store_id);
+        store.district = normalize_district(&store.district);
+        store.format = normalize_format(&store.format);
+        store.model = normalize_model(&store.model);
+    }
+    for product in products.iter_mut() {
+        product.store_id = normalize_store_id(&product.store_id);
+    }
+    for rating in ratings.iter_mut() {
+        rating.store_id = normalize_store_id(&rating.store_id);
+    }
+
+    let mut quality = DataQuality {
+        invalid_ratings: ratings
+            .iter()
+            .filter(|rating| rating.score.is_none())
+            .count() as u32,
+        implausible_wait_times: ratings
+            .iter()
+            .filter(|rating| {
+                rating
+                    .wait_time_minutes
+                    .is_some_and(|wait_time| wait_time == 0 || wait_time > 120)
+            })
+            .count() as u32,
+        missing_unit_costs: products
+            .iter()
+            .filter(|product| product.unit_cost.is_none())
+            .count() as u32,
+        ..DataQuality::default()
+    };
+    let mut seen = HashSet::new();
+    daily_sales.retain_mut(|sale| {
+        sale.id_loja = normalize_store_id(&sale.id_loja);
+        if seen.insert((sale.id_loja.clone(), sale.date)) {
+            true
+        } else {
+            quality.duplicate_daily_sales += 1;
+            false
+        }
+    });
+    quality
+}
+
+fn normalize_store_id(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+fn normalize_district(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .to_lowercase()
+        .replace(['/', '-', '(', ')'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match normalized.as_str() {
+        "bh" | "bh mg" | "belo horizonte mg" => "Belo Horizonte/MG".to_owned(),
+        "contagem mg" => "Contagem/MG".to_owned(),
+        "nova lima mg" => "Nova Lima/MG".to_owned(),
+        "juiz de fora mg" => "Juiz de Fora/MG".to_owned(),
+        "vitoria es" | "vitória es" => "Vitória/ES".to_owned(),
+        "campinas sp" => "Campinas/SP".to_owned(),
+        "uberlandia mg" | "uberlândia mg" => "Uberlândia/MG".to_owned(),
+        "sao paulo sp" | "são paulo sp" => "São Paulo/SP".to_owned(),
+        _ => value.trim().to_owned(),
+    }
+}
+
+fn normalize_format(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "rua" | "loja de rua" => "Rua".to_owned(),
+        "shopping" | "shopping center" => "Shopping".to_owned(),
+        "quiosque" | "kiosk" => "Quiosque".to_owned(),
+        _ => value.trim().to_owned(),
+    }
+}
+
+fn normalize_model(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "propria" | "própria" => "Própria".to_owned(),
+        "franquia" => "Franquia".to_owned(),
+        _ => value.trim().to_owned(),
+    }
 }
 
 const DATE_FORMATS: [&str; 3] = ["%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y"];
@@ -229,5 +330,70 @@ mod tests {
         assert_eq!(ratings.len(), 380);
 
         Ok(())
+    }
+
+    #[test]
+    fn normalizes_dimensions_and_reports_data_quality() {
+        let mut stores = vec![Store {
+            store_id: " lj01 ".to_owned(),
+            name: "Teste".to_owned(),
+            district: "bh/mg".to_owned(),
+            format: "Loja de rua".to_owned(),
+            model: "propria".to_owned(),
+            opening_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            status: true,
+        }];
+        let first_sale = DailySale {
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            id_loja: "lj01".to_owned(),
+            gross_revenue: Decimal::from(100),
+            discounts: Decimal::ZERO,
+            ticket_count: 1,
+            team_worked_hours: Decimal::ONE,
+            ingredient_cost: Decimal::ONE,
+            waste_value: Decimal::ZERO,
+        };
+        let mut sales = vec![
+            first_sale.clone(),
+            DailySale {
+                id_loja: " LJ01 ".to_owned(),
+                ..first_sale
+            },
+        ];
+        let mut products = vec![Product {
+            store_id: "lj01".to_owned(),
+            reference_month: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            name: "Café".to_owned(),
+            quantity_sold: 1,
+            average_price: Decimal::ONE,
+            unit_cost: None,
+        }];
+        let mut ratings = vec![Rating {
+            rating_id: "1".to_owned(),
+            store_id: "lj01".to_owned(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            score: None,
+            channel: "app".to_owned(),
+            wait_time_minutes: Some(999),
+            comment: None,
+        }];
+
+        let quality = normalize_loaded_data(&mut stores, &mut sales, &mut products, &mut ratings);
+
+        assert_eq!(stores[0].store_id, "LJ01");
+        assert_eq!(stores[0].district, "Belo Horizonte/MG");
+        assert_eq!(stores[0].format, "Rua");
+        assert_eq!(stores[0].model, "Própria");
+        assert_eq!(sales.len(), 1);
+        assert_eq!(sales[0].id_loja, "LJ01");
+        assert_eq!(
+            quality,
+            DataQuality {
+                duplicate_daily_sales: 1,
+                invalid_ratings: 1,
+                implausible_wait_times: 1,
+                missing_unit_costs: 1,
+            }
+        );
     }
 }
