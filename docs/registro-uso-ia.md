@@ -1,0 +1,21 @@
+# Registro de uso de inteligência artificial
+
+Este registro descreve o uso real de IA na preparação desta entrega. A IA foi usada para converter o enunciado, criticar o recorte e conduzir uma entrevista de decisões. As decisões finais e suas justificativas foram definidas pelo candidato.
+
+| Momento | O que foi pedido (prompt exato) | O que foi devolvido (resumo) | O que foi mantido, alterado ou descartado, com critério |
+|---|---|---|---|
+| 1. Conversão do material | `Convert the Case into a .md file` | Extração do PDF e conversão do conteúdo para Markdown, preservando seções, tabelas e requisitos. | **Mantido.** A conversão tornou o enunciado pesquisável e permitiu rastrear os requisitos. O conteúdo foi preservado sem reinterpretar regras do case. |
+| 2. Proposta inicial de recorte | `What do you think I should do based on @Case Tecnico - Rede Turmalina Cafe.md` | Recomendação de um painel de priorização semanal, com comparação de 28 dias, sinais de qualidade, dados por loja e exclusão da decisão de expansão por falta de custos fixos e dados de mercado. | **Mantido em parte.** Foram mantidos o foco na reunião semanal, a comparação de 28 dias e os limites para a amostra de cliente. A normalização por dias observados foi corrigida posteriormente: ausência de linha de venda significa loja fechada e venda zero. A exclusão total de expansão foi alterada: a entrega incluirá uma página de prontidão, mas sem recomendação de expandir. |
+| 3. Crítica e definição das decisões | `Grill me then write the docs` | Uma entrevista em rodadas para definir escopo, páginas, arquitetura, métricas, limites, tratamento de qualidade e documentação. | **Mantido em parte.** A entrevista consolidou cinco páginas, API Rust com agregação na inicialização, frontend Astro estático, escore simples de cinco sinais, janela de 90 dias para cliente e documentação em português. Recomendações sobre categorias de produto foram descartadas. |
+
+## Um desacordo
+
+A recomendação inicial da IA foi excluir completamente a expansão do produto porque a base não mede lucro, investimento, capacidade de gestão, demanda de mercado ou canibalização. O candidato discordou do descarte total: se a rede apresentar sinais operacionais consistentes, o tema deve ao menos estar visível para a diretoria.
+
+A decisão final foi uma página de **expansão e qualidade dos dados** com um checklist de prontidão, e não uma recomendação de “expandir” ou “não expandir”. O argumento é que margem após insumos pode servir como sinal operacional, mas não sustenta uma decisão financeira. Assim, o painel preserva a pergunta estratégica sem afirmar algo que os dados não permitem.
+
+## Uma recusa
+
+A IA propôs inicialmente uma análise de mix por categoria, após normalizar grafias como `Café`, `CAFÉ`, `Cafés` e `cafe`. A proposta foi recusada.
+
+Categorias não são necessárias para responder à decisão semanal e exigiriam uma padronização adicional de um campo livre. Além disso, custos unitários estão ausentes em parte das linhas, o que torna inadequado sugerir rentabilidade por categoria ou produto. A solução final mostra somente os cinco produtos mais vendidos por quantidade de cada loja prioritária, usando o mês mais recente e sem alegar margem de produto.
