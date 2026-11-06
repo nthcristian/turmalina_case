@@ -10,10 +10,33 @@ type Store = {
     status: boolean;
 };
 type Metric = string | number;
-type Product = {
+type ProductComparison = {
     name: string;
-    quantity_sold: number;
-    estimated_sales: Metric;
+    current_quantity_sold: number;
+    previous_quantity_sold: number | null;
+    quantity_change_pct: Metric | null;
+    current_average_price: Metric;
+    previous_average_price: Metric | null;
+    price_change_pct: Metric | null;
+    current_estimated_sales: Metric;
+    previous_estimated_sales: Metric | null;
+    estimated_sales_change_pct: Metric | null;
+    is_new_in_current_month: boolean;
+};
+type ProductMissingFromCurrentMonth = {
+    name: string;
+    previous_quantity_sold: number;
+    previous_average_price: Metric;
+    previous_estimated_sales: Metric;
+};
+type StoreProductAnalysis = {
+    store_id: string;
+    current_reference_month: string;
+    previous_reference_month: string;
+    top_selling_products: ProductComparison[];
+    least_selling_products: ProductComparison[];
+    products: ProductComparison[];
+    missing_from_current_month: ProductMissingFromCurrentMonth[];
 };
 type Indicator = {
     store_id: string;
@@ -31,7 +54,6 @@ type Indicator = {
     valid_rating_count: number;
     average_rating: Metric | null;
     median_wait_time_minutes: number | null;
-    top_selling_products: Product[];
     current_period_discounts_amount: Metric;
     discounts_total?: Metric;
     discounts_pct_of_gross_sales?: Metric;
@@ -59,7 +81,7 @@ type DashboardMetadata = {
     comparison_period_start?: string;
     comparison_period_end?: string;
 };
-type Tab = "overview" | "stores" | "margin" | "team" | "expansion";
+type Tab = "overview" | "stores" | "products" | "margin" | "team" | "expansion";
 
 const API_URL = import.meta.env.PUBLIC_API_URL ?? "http://127.0.0.1:3000";
 const money = new Intl.NumberFormat("pt-BR", {
@@ -83,6 +105,7 @@ const fallbackPeriod = {
 const tabs: Array<[Tab, string]> = [
     ["overview", "Visão geral"],
     ["stores", "Lojas"],
+    ["products", "Produtos"],
     ["margin", "Margem e desperdício"],
     ["team", "Equipe e cliente"],
     ["expansion", "Expansão e qualidade"],
@@ -174,6 +197,8 @@ export default function Dashboard() {
     const [quality, setQuality] = useState<DataQuality | null>(null);
     const [metadata, setMetadata] = useState<DashboardMetadata | null>(null);
     const [salesSeries, setSalesSeries] = useState<DailySalesPoint[]>([]);
+    const [productAnalysis, setProductAnalysis] =
+        useState<StoreProductAnalysis | null>(null);
     const [tab, setTab] = useState<Tab>("overview");
     const [format, setFormat] = useState("all");
     const [model, setModel] = useState("all");
@@ -252,6 +277,20 @@ export default function Dashboard() {
             .then((response) => (response.ok ? response.json() : []))
             .then((points: DailySalesPoint[]) => setSalesSeries(points))
             .catch(() => setSalesSeries([]));
+    }, [selected]);
+    useEffect(() => {
+        if (!selected) {
+            setProductAnalysis(null);
+            return;
+        }
+        void fetch(
+            `${API_URL}/api/stores/${encodeURIComponent(selected.id_loja)}/products`,
+        )
+            .then((response) => (response.ok ? response.json() : null))
+            .then((analysis: StoreProductAnalysis | null) =>
+                setProductAnalysis(analysis),
+            )
+            .catch(() => setProductAnalysis(null));
     }, [selected]);
     const salesPerDay = stores.reduce(
         (total, store) =>
@@ -495,6 +534,50 @@ export default function Dashboard() {
                                 <StoreTable stores={filtered} />
                             </section>
                         )}
+                        {tab === "products" && (
+                            <section id="products-panel" role="tabpanel">
+                                <Heading
+                                    eyebrow="Giro e preço"
+                                    title="Produtos por loja"
+                                    note="A competência mais recente é comparada à anterior. Quantidade define os rankings; preço é apresentado sem julgamento de positivo ou negativo."
+                                />
+                                <div className="mt-5 flex flex-wrap gap-3 rounded-2xl bg-white p-4 shadow-sm">
+                                    <Filter
+                                        label="Formato"
+                                        value={format}
+                                        onChange={setFormat}
+                                        options={[
+                                            ...new Set(
+                                                stores.map(
+                                                    (store) => store.formato,
+                                                ),
+                                            ),
+                                        ]}
+                                    />
+                                    <Filter
+                                        label="Modelo"
+                                        value={model}
+                                        onChange={setModel}
+                                        options={[
+                                            ...new Set(
+                                                stores.map(
+                                                    (store) => store.modelo,
+                                                ),
+                                            ),
+                                        ]}
+                                    />
+                                    <StoreSelector
+                                        stores={filtered}
+                                        value={selected?.id_loja ?? ""}
+                                        onChange={setSelectedId}
+                                    />
+                                </div>
+                                <ProductAnalysisView
+                                    analysis={productAnalysis}
+                                    store={selected}
+                                />
+                            </section>
+                        )}
                         {tab === "margin" && (
                             <section id="margin-panel" role="tabpanel">
                                 <Heading
@@ -701,6 +784,242 @@ function Filter({
         </label>
     );
 }
+function StoreSelector({
+    stores,
+    value: selectedStoreId,
+    onChange,
+}: {
+    stores: DashboardStore[];
+    value: string;
+    onChange: (value: string) => void;
+}) {
+    return (
+        <label className="text-sm font-medium text-[#35564a]">
+            Loja
+            <select
+                className="ml-2 rounded-lg border border-[#cbd8d0] bg-white px-3 py-2 text-[#173c30]"
+                value={selectedStoreId}
+                onChange={(event) => onChange(event.target.value)}
+            >
+                {stores.map((store) => (
+                    <option key={store.id_loja} value={store.id_loja}>
+                        {store.nome_loja}
+                    </option>
+                ))}
+            </select>
+        </label>
+    );
+}
+function ProductAnalysisView({
+    analysis,
+    store,
+}: {
+    analysis: StoreProductAnalysis | null;
+    store?: DashboardStore;
+}) {
+    if (!store)
+        return <Empty text="Nenhuma loja atende aos filtros selecionados." />;
+    if (!analysis)
+        return <Empty text="Carregando a análise mensal de produtos..." />;
+
+    return (
+        <div className="mt-5 space-y-5">
+            <p className="text-sm text-slate-600">
+                {store.nome_loja} ·{" "}
+                {formatDate(analysis.current_reference_month)} versus{" "}
+                {formatDate(analysis.previous_reference_month)}
+            </p>
+            <div className="grid gap-5 lg:grid-cols-2">
+                <ProductRanking
+                    title="Cinco mais vendidos"
+                    note="Maior quantidade na competência atual"
+                    products={analysis.top_selling_products}
+                />
+                <ProductRanking
+                    title="Cinco menos vendidos"
+                    note="Menor quantidade entre produtos registrados na competência atual"
+                    products={analysis.least_selling_products}
+                />
+            </div>
+            <ProductTable products={analysis.products} />
+            <article className="rounded-2xl bg-[#fffaf0] p-5 ring-1 ring-[#ead8b8]">
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#8a5a25]">
+                    Produtos sem registro na competência atual
+                </p>
+                {analysis.missing_from_current_month.length === 0 ? (
+                    <p className="mt-3 text-sm text-[#765a38]">
+                        Nenhum produto da competência anterior ficou sem
+                        registro.
+                    </p>
+                ) : (
+                    <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {analysis.missing_from_current_month.map((product) => (
+                            <li
+                                className="rounded-xl bg-white/70 p-3 text-sm text-[#573a1a]"
+                                key={product.name}
+                            >
+                                <b>{product.name}</b>
+                                <span className="mt-1 block text-xs">
+                                    {number.format(
+                                        product.previous_quantity_sold,
+                                    )}{" "}
+                                    unidades ·{" "}
+                                    {money.format(
+                                        value(
+                                            product.previous_estimated_sales,
+                                        ) ?? 0,
+                                    )}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+                <p className="mt-4 text-xs text-[#765a38]">
+                    Ausência não é venda zero, descontinuação ou
+                    indisponibilidade.
+                </p>
+            </article>
+        </div>
+    );
+}
+function ProductRanking({
+    title,
+    note,
+    products,
+}: {
+    title: string;
+    note: string;
+    products: ProductComparison[];
+}) {
+    return (
+        <article className="rounded-2xl bg-white p-5 shadow-sm">
+            <h3 className="font-serif text-2xl text-[#173c30]">{title}</h3>
+            <p className="mt-1 text-xs text-slate-500">{note}</p>
+            <ol className="mt-4 space-y-2">
+                {products.map((product, index) => (
+                    <li
+                        className="flex items-center justify-between gap-3 rounded-xl bg-[#f5f8f5] p-3"
+                        key={product.name}
+                    >
+                        <div className="min-w-0">
+                            <span className="mr-2 text-xs font-bold text-[#5a7669]">
+                                {index + 1}
+                            </span>
+                            <b className="text-sm text-[#173c30]">
+                                {product.name}
+                            </b>
+                            <ProductStatus product={product} />
+                        </div>
+                        <div className="text-right">
+                            <b className="block text-sm text-[#173c30]">
+                                {number.format(product.current_quantity_sold)}
+                            </b>
+                            <span
+                                className={`text-xs ${metricClass(product.quantity_change_pct)}`}
+                            >
+                                {percent(product.quantity_change_pct)}
+                            </span>
+                        </div>
+                    </li>
+                ))}
+            </ol>
+        </article>
+    );
+}
+function ProductStatus({ product }: { product: ProductComparison }) {
+    return product.is_new_in_current_month ? (
+        <span className="ml-2 rounded-full bg-[#e8b65f] px-2 py-0.5 text-[10px] font-bold uppercase text-[#573a1a]">
+            Novo
+        </span>
+    ) : null;
+}
+function ProductTable({ products }: { products: ProductComparison[] }) {
+    return (
+        <section className="rounded-2xl bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-4">
+                <h3 className="font-serif text-2xl text-[#173c30]">
+                    Todos os produtos registrados
+                </h3>
+                <p className="text-xs text-slate-500">
+                    Preço médio tem leitura neutra; quantidade e valor estimado
+                    mostram variação contra a competência anterior.
+                </p>
+            </div>
+            <div
+                className="overflow-x-auto focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#0c5d4d]"
+                tabIndex={0}
+                role="region"
+                aria-label="Tabela de comparação de produtos"
+            >
+                <table className="w-full min-w-245 text-left text-sm">
+                    <thead className="bg-[#f8f7f3] text-xs uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th className="px-5 py-3">Produto</th>
+                            <th className="px-3 py-3">Quantidade</th>
+                            <th className="px-3 py-3">Δ quantidade</th>
+                            <th className="px-3 py-3">Preço médio</th>
+                            <th className="px-3 py-3">Δ preço</th>
+                            <th className="px-5 py-3">Valor estimado</th>
+                            <th className="px-5 py-3">Δ valor</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {products.map((product) => (
+                            <tr
+                                className="hover:bg-[#faf9f5]"
+                                key={product.name}
+                            >
+                                <td className="px-5 py-4 font-semibold text-[#173c30]">
+                                    {product.name}
+                                    <ProductStatus product={product} />
+                                </td>
+                                <td className="px-3 py-4">
+                                    {number.format(
+                                        product.current_quantity_sold,
+                                    )}
+                                </td>
+                                <td
+                                    className={`px-3 py-4 font-medium ${metricClass(product.quantity_change_pct)}`}
+                                >
+                                    {product.is_new_in_current_month
+                                        ? "Novo na competência"
+                                        : percent(product.quantity_change_pct)}
+                                </td>
+                                <td className="px-3 py-4">
+                                    {money.format(
+                                        value(product.current_average_price) ??
+                                            0,
+                                    )}
+                                </td>
+                                <td className="px-3 py-4 text-slate-600">
+                                    {product.is_new_in_current_month
+                                        ? "Novo na competência"
+                                        : percent(product.price_change_pct)}
+                                </td>
+                                <td className="px-5 py-4">
+                                    {money.format(
+                                        value(
+                                            product.current_estimated_sales,
+                                        ) ?? 0,
+                                    )}
+                                </td>
+                                <td
+                                    className={`px-5 py-4 font-medium ${metricClass(product.estimated_sales_change_pct)}`}
+                                >
+                                    {product.is_new_in_current_month
+                                        ? "Novo na competência"
+                                        : percent(
+                                              product.estimated_sales_change_pct,
+                                          )}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
+}
 function Quality({
     stores,
     lowSample,
@@ -769,7 +1088,7 @@ function RecentStoreEvolution({ stores }: { stores: DashboardStore[] }) {
             />
             {stores.length ? (
                 <div className="mt-5 overflow-x-auto">
-                    <table className="w-full min-w-[600px] text-left text-sm">
+                    <table className="w-full min-w-150 text-left text-sm">
                         <thead className="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-500">
                             <tr>
                                 <th className="pb-3 pr-4">Loja</th>
@@ -885,29 +1204,6 @@ function PriorityCard({
                         </li>
                     ))}
                 </ul>
-            </div>
-            <div className="p-6">
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#cdbb98]">
-                    Cinco mais vendidos · mês mais recente
-                </p>
-                <ol className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {indicator.top_selling_products
-                        .slice(0, 5)
-                        .map((product) => (
-                            <li
-                                className="flex justify-between rounded-lg bg-white/10 px-3 py-2 text-xs"
-                                key={product.name}
-                            >
-                                <span>{product.name}</span>
-                                <b className="text-[#cdbb98]">
-                                    {number.format(product.quantity_sold)} ·{" "}
-                                    {money.format(
-                                        value(product.estimated_sales) ?? 0,
-                                    )}
-                                </b>
-                            </li>
-                        ))}
-                </ol>
             </div>
         </article>
     );
@@ -1123,7 +1419,7 @@ function StoreTable({
                 role="region"
                 aria-label="Tabela comparativa de lojas"
             >
-                <table className="w-full min-w-[1000px] text-left text-sm">
+                <table className="w-full min-w-250 text-left text-sm">
                     <thead className="bg-[#f8f7f3] text-xs uppercase tracking-wide text-slate-500">
                         <tr>
                             <th className="px-5 py-3">Loja</th>

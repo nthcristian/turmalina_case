@@ -4,6 +4,7 @@ use anyhow::Result;
 use api::{
     indicator::{AnalysisMetadata, StoreIndicators},
     model::{DailySale, DataQuality, Product, Rating, Store, normalize_loaded_data},
+    product_analysis::{StoreProductAnalysis, analyze_store_products},
 };
 use axum::{
     Json, Router,
@@ -25,6 +26,7 @@ struct AppState {
     data_quality: Arc<DataQuality>,
     daily_sales: Arc<Vec<DailySale>>,
     metadata: Arc<AnalysisMetadata>,
+    products: Arc<Vec<Product>>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +117,24 @@ async fn get_store_sales(
     Ok(Json(points))
 }
 
+async fn get_store_products(
+    State(state): State<AppState>,
+    Path(store_id): Path<String>,
+) -> Result<Json<StoreProductAnalysis>, StatusCode> {
+    if !state
+        .stores
+        .iter()
+        .any(|store| store.store_id.eq_ignore_ascii_case(&store_id))
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    analyze_store_products(&state.products, &store_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut stores_reader = get_csv_reader("turmalina_lojas")?;
@@ -155,6 +175,7 @@ async fn main() -> Result<()> {
         data_quality: Arc::new(data_quality),
         daily_sales: Arc::new(daily_sales),
         metadata: Arc::new(metadata),
+        products: Arc::new(products),
     };
     let app = Router::new()
         .route("/api/stores", get(list_stores))
@@ -167,6 +188,7 @@ async fn main() -> Result<()> {
             get(get_store_indicators),
         )
         .route("/api/stores/{store_id}/sales", get(get_store_sales))
+        .route("/api/stores/{store_id}/products", get(get_store_products))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
